@@ -10,7 +10,7 @@ Credit default prediction pipeline with fairness constraints: 7 relational table
 |---|---|
 | [`MODEL_CARD.md`](MODEL_CARD.md) | Current champion model's performance, fairness status, and limitations — **read this first** |
 | [`METHODOLOGY.md`](METHODOLOGY.md) | How the pipeline works, step by step, with the reproduce-it commands |
-| [`PROGRESS.md`](PROGRESS.md) | Every decision made and why, including the fairness investigation that found the age-bias issue |
+| `PROGRESS.md` (internal, not in this repo) | Every decision made and why, including the fairness investigation that found the age-bias issue |
 | [`experiments/tradeoffs.md`](experiments/tradeoffs.md) | Interview-ready summary of the major engineering tradeoffs, with real numbers |
 
 ## Quick start
@@ -32,8 +32,14 @@ python serving/batch_predict.py        # score the full portfolio
 uvicorn serving.app:app --reload       # real-time API on :8000
 streamlit run monitoring/dashboard.py  # monitoring UI on :8501
 
-pytest tests/                          # 34 tests
+docker compose up -d --build airflow   # optional: orchestration, see below
+pytest tests/                          # 64 tests
+python serving/load_test.py            # optional: needs the API running first
 ```
+
+**Airflow (optional):** `docker compose up -d --build airflow` brings up a standalone Airflow instance (webserver+scheduler in one container) at `localhost:8080` (admin/admin), with the whole project mounted so `dags/credit_default_retrain.py`'s task callables run the real project code. Trigger manually with `docker exec <container> airflow dags trigger credit_default_retrain` — no need to wait for the monthly schedule.
+
+**API auth:** `/predict`, `/batch-score`, and `/fairness-report` require an `X-API-Key` header matching `API_KEY` in `.env` (generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`). `/health` is intentionally public.
 
 Requires a Kaggle account with `kaggle.json` at `~/.kaggle/` and the [Home Credit Default Risk](https://www.kaggle.com/competitions/home-credit-default-risk) competition rules accepted — see `PROGRESS.md` Stage 2 for the exact steps if the download fails.
 
@@ -46,6 +52,8 @@ Postgres (raw) --dbt--> Postgres (staging/intermediate/features)
                               |
                     CatBoost champion + fairness audit (Fairlearn)
                               |
+                    MLflow Model Registry (`champion` alias)
+                              |
               FastAPI + Redis (real-time)  |  batch_predict.py (portfolio)
                               |
               Streamlit dashboard  +  Airflow DAG (monthly retrain)
@@ -53,20 +61,23 @@ Postgres (raw) --dbt--> Postgres (staging/intermediate/features)
 
 ## Repository layout
 
-- `data_engineering/` — Postgres loader, dbt project (staging/intermediate/features), validation
-- `features/` — WoE encoder; PySpark/Dask scale supplement (not yet built)
+- `data_engineering/` — Postgres loader, dbt project (staging/intermediate/features), validation, FRED economic-indicator ingestion
+- `features/` — WoE encoder; PySpark/Dask scale supplement (payment-trend slope, utilization volatility — both real, both verified against the full dataset)
+- `docker/spark_job.Dockerfile` — Java 8 + pinned pyarrow, the working way to run `spark_features.py`'s Arrow/pandas_udf path (native Windows Python can't — see `PROGRESS.md` Stage 22)
 - `models/` — WoE scorecard, model comparison training entrypoints, Optuna/stability tuning, H2O AutoML
 - `experiments/` — model zoo, comparison harness, tradeoffs writeup
 - `evaluation/` — credit-risk metrics (KS, Gini, PSI, lift)
-- `explainability/` — SHAP, ECOA adverse action codes, Fairlearn fairness audit + mitigation
-- `serving/` — FastAPI app, Redis cache, batch scoring
+- `explainability/` — SHAP, ECOA adverse action codes, Fairlearn fairness audit + mitigation (post-hoc thresholds and constrained retraining, both tried)
+- `serving/` — FastAPI app (API-key auth on decision endpoints), Redis cache, batch scoring, async load test
+- `models/registry.py` — MLflow Model Registry: register, gate-and-promote to a `champion` alias, load in serving with a joblib fallback
+- `.github/workflows/ci.yml` — pytest + `dbt parse` on every push/PR
 - `monitoring/` — drift detection (PSI + Evidently), alerting, Streamlit dashboard
-- `dags/` — Airflow retraining DAG (written, not yet executed against a live scheduler)
-- `tests/` — 34 tests covering the above
+- `dags/` — Airflow retraining DAG, containerized (`airflow/`) and verified with a real end-to-end run
+- `tests/` — 64 tests covering the above
 
 ## Known gaps
 
-- The underlying model is still age-biased; fairness is currently achieved via post-hoc per-group threshold correction, not a bias-free model — see `MODEL_CARD.md`
-- `features/spark_features.py`, `features/dask_features.py`, `data_engineering/ingest_fred.py` are unimplemented stubs
-- No Airflow scheduler has actually run the retraining DAG
+- The underlying model retains some age bias via legitimate proxy correlation (credit history length); fairness is achieved via calibrated per-group decision thresholds live in serving, not a fully bias-free model — see `MODEL_CARD.md`. A constrained-retraining candidate now passes the fairness gate on its own, but at slightly more AUC cost than this project's acceptance rule allows.
+- Fairness coverage is gender + age only — no race/ethnicity, because this dataset has no surname/geography/nationality to support the standard proxy method (BISG). A dataset limitation, not something more engineering closes — see `PROGRESS.md` Stage 20.
+- Applicants who decline to disclose gender get a "benefit of the doubt" fallback threshold (most lenient calibrated group), not the fairness correction proper — a deliberate policy choice, not an oversight.
 - Full detail on every gap and why it's still open: `PROGRESS.md`, "Open decisions" section at the bottom

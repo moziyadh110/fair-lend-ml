@@ -31,3 +31,8 @@ models/h2o/
 # os
 .DS_Store
 Thumbs.db
+
+# internal planning/decision-log docs — not part of the published repo
+plan.md
+UPDATED PLAN.MD
+PROGRESS.md
