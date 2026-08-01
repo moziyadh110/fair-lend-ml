@@ -21,7 +21,14 @@ from models.woe_scorecard import train_woe_scorecard
 load_dotenv()
 
 FEATURE_COLS = [
-    "age_years", "years_employed", "amt_income_total", "amt_credit", "amt_annuity",
+    # age_years deliberately excluded — it's a protected attribute (see
+    # _protected_age below) and was, until this fix, being fed directly into
+    # the model as a raw input despite every doc in this project claiming
+    # otherwise. Found while investigating the age fairness gap: this is a
+    # more direct problem than any proxy feature — ECOA doesn't just prohibit
+    # disparate impact, using age as a straightforward risk-increasing input
+    # is its own violation. See PROGRESS.md.
+    "years_employed", "amt_income_total", "amt_credit", "amt_annuity",
     "credit_income_ratio", "annuity_income_ratio", "goods_to_credit_ratio",
     "owns_car", "owns_realty", "cnt_children",
     "bureau_loan_count", "active_loans", "closed_loans", "avg_days_overdue",
@@ -30,7 +37,11 @@ FEATURE_COLS = [
     "late_payments", "avg_days_late", "payment_volatility", "total_installments",
     "avg_cc_utilization", "max_cc_utilization", "avg_days_past_due_cc", "num_credit_cards",
     "pos_late_payments", "avg_pos_days_past_due",
-    "exposure_at_risk", "late_payment_rate", "high_util_x_high_leverage", "many_loans_x_young",
+    # many_loans_x_young also excluded — it's defined as
+    # (bureau_loan_count > 5 AND age_years < 30), an explicit age-gated rule,
+    # not just an age-correlated feature. Its IV was only 0.006 (essentially
+    # no signal), so this costs nothing to drop.
+    "exposure_at_risk", "late_payment_rate", "high_util_x_high_leverage",
 ]
 
 
