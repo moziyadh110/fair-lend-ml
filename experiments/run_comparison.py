@@ -29,6 +29,15 @@ def main():
     engine = create_engine(url)
     df = pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
 
+    # A handful of rows have code_gender='XNA' (Home Credit's placeholder for
+    # undisclosed gender, not a real category) — same fix as models/train_champion.py
+    # (see PROGRESS.md Stage 11). Without this, the DP-gender gaps below are
+    # inflated by a 4-row statistical outlier group, same failure mode already
+    # found and fixed for the deployed champion, now applied here too (item #5
+    # in the improvement list — this table was flagged as still using the
+    # unfiltered, worse-than-real numbers).
+    df = df[df["_protected_gender"] != "XNA"].reset_index(drop=True)
+
     X, y = df[FEATURE_COLS], df["target"]
     gender = df["_protected_gender"]
 
