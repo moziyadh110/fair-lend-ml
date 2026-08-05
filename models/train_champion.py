@@ -36,6 +36,7 @@ from explainability.fairness import (
     full_fairness_audit,
     retrain_with_fairness_constraints,
 )
+from models.registry import register_champion
 from models.train_baseline import FEATURE_COLS
 
 load_dotenv()
@@ -196,6 +197,23 @@ def main():
     }
     (ARTIFACTS_DIR / "fairness_report.json").write_text(json.dumps(report, indent=2))
     print(f"\nSaved artifacts/champion_model.joblib and artifacts/fairness_report.json")
+
+    # Also register in MLflow's Model Registry, aliased `champion` if it
+    # clears the promotion gate. The joblib artifact above remains a local
+    # cache/fallback — serving/app.py tries the registry first. See
+    # PROGRESS.md for why this replaced the originally-sketched Docker
+    # mlflow service (MLflow 3.x's default local backend is already
+    # database-backed, which is all the registry needs).
+    registry_metrics = {"auc_roc": raw_auc if deployed_name == "catboost_raw" else fair_auc,
+                         **{k: v for k, v in final_audit.items() if isinstance(v, (int, float))}}
+    version = register_champion(
+        deployed_model, FEATURE_COLS, group_thresholds if mitigation_deployed else {},
+        default_threshold=0.5, metrics=registry_metrics, cleared_for_production=cleared_for_production,
+    )
+    if version:
+        print(f"MLflow: promoted credit_default v{version} to alias 'champion'")
+    else:
+        print("MLflow: registered but not promoted (see registry.py's gate)")
     print(f"Deployed: {deployed_name}. Cleared for production: {cleared_for_production} "
           f"(mitigation deployed: {mitigation_deployed})")
 
