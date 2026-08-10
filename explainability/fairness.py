@@ -202,16 +202,42 @@ def calibrate_group_thresholds(y_pred_proba, gender, age, target_positive_rate: 
     return thresholds
 
 
-def apply_group_thresholds(y_pred_proba, gender, age, thresholds: dict, default_threshold: float = 0.5) -> np.ndarray:
+def non_disclosure_threshold(thresholds: dict, fallback: float = 0.5) -> float:
+    """The DENY threshold for an applicant whose protected-attribute group is
+    unknown (declined to disclose gender, or a combination never seen during
+    calibration).
+
+    Deliberately NOT the flat/raw model's threshold — that threshold is
+    exactly the one Stage 14/15 showed produces a 0.456 age demographic-
+    parity gap, so falling back to it would mean non-disclosure quietly
+    reintroduces the bias the calibration exists to fix. Instead, use the
+    MOST LENIENT (lowest) threshold among all calibrated groups: an applicant
+    who doesn't disclose is judged at least as favorably as the best-treated
+    disclosed group, so choosing not to disclose can only help, never hurt,
+    relative to the fairness-corrected population. This is a "benefit of the
+    doubt" policy, not a mathematical fairness guarantee — see PROGRESS.md
+    for the real tradeoff this makes (denial rate rises slightly for the
+    disclosed population to keep the portfolio-wide rate on target, since
+    non-disclosed applicants are, on average, judged more leniently).
+    """
+    if not thresholds:
+        return fallback
+    return min(thresholds.values())
+
+
+def apply_group_thresholds(y_pred_proba, gender, age, thresholds: dict, default_threshold: float | None = None) -> np.ndarray:
     """Apply per-group thresholds from calibrate_group_thresholds to produce
     binary decisions. Falls back to `default_threshold` for any (gender,
-    age_bin) combination not seen during calibration."""
+    age_bin) combination not seen during calibration — or, if not given, to
+    `non_disclosure_threshold(thresholds)` (see its docstring for why that's
+    the safer default than a flat threshold)."""
     y_pred_proba = np.asarray(y_pred_proba)
     gender = np.asarray(gender)
     age_bins = age_bin_labels(age).astype(str).values
+    fallback = default_threshold if default_threshold is not None else non_disclosure_threshold(thresholds)
 
     pred = np.zeros(len(y_pred_proba), dtype=int)
     for i in range(len(y_pred_proba)):
-        t = thresholds.get((gender[i], age_bins[i]), default_threshold)
+        t = thresholds.get((gender[i], age_bins[i]), fallback)
         pred[i] = int(y_pred_proba[i] >= t)
     return pred
