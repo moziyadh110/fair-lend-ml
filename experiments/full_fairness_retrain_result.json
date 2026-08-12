@@ -1,0 +1,16 @@
+{
+  "auc": 0.7104651320408111,
+  "training_minutes": 25.88237718741099,
+  "n_predictors": 21,
+  "n_nonzero_predictors": 6,
+  "dp_gender": 0.00660822434134252,
+  "eo_gender": 0.03690986385206374,
+  "dp_age": 0.09249667848734407,
+  "auc_disparity_gender": 0.009184210661211778,
+  "four_fifths_ratio": 0.9927356325336555,
+  "four_fifths_pass": true,
+  "demographic_parity_pass_gender": true,
+  "demographic_parity_pass_age": false,
+  "demographic_parity_pass": false,
+  "auc_cost_vs_raw_champion": 0.013935619983890368
+}
