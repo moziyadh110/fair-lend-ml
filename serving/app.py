@@ -21,12 +21,16 @@ import joblib
 import numpy as np
 import pandas as pd
 import shap
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException
 
+from serving.auth import require_api_key
 from serving.cache import build_client, cache_key, get_cached, set_cached
 from serving.schemas import LoanApplication, PredictionResponse
 from explainability.adverse_action import generate_adverse_action_reasons
-from explainability.fairness import age_bin_labels
+from explainability.fairness import age_bin_labels, non_disclosure_threshold
+
+load_dotenv()
 
 app = FastAPI(title="CreditShield Risk API", version="2.0.0")
 logger = logging.getLogger(__name__)
@@ -43,17 +47,50 @@ EXPLAINER = None
 CACHE = None
 
 
+def _load_champion():
+    """MLflow Model Registry first (the `champion` alias — see
+    models/registry.py), falling back to the local joblib artifact if the
+    registry has nothing promoted yet (fresh clone, or a run that registered
+    but didn't clear the promotion gate). Returns (model, feature_cols,
+    group_thresholds, default_threshold) or (None, [], {}, 0.5)."""
+    try:
+        from models.registry import load_champion
+        model, metadata = load_champion()
+        logger.info("Loaded champion from MLflow Model Registry.")
+        return model, metadata["feature_cols"], metadata["group_thresholds"], metadata["default_threshold"]
+    except Exception as e:
+        logger.info(f"MLflow registry load failed or nothing promoted yet ({e}); "
+                     "falling back to artifacts/champion_model.joblib.")
+
+    champion_path = ARTIFACTS_DIR / "champion_model.joblib"
+    if not champion_path.exists():
+        return None, [], {}, 0.5
+    bundle = joblib.load(champion_path)
+    return bundle["model"], bundle["feature_cols"], bundle.get("group_thresholds", {}), bundle.get("default_threshold", 0.5)
+
+
+def _warm_up():
+    """Pays the ~2.3s first-call cost (CatBoost + SHAP TreeExplainer
+    background-dataset setup — measured in PROGRESS.md Stage 21) once at
+    startup, on a dummy all-zero row, instead of making the first real
+    applicant pay it. Best-effort: a warm-up failure shouldn't block startup
+    or take the service down — the first real request just pays the cost
+    that would otherwise have been absorbed here."""
+    try:
+        dummy_row = pd.DataFrame([{col: 0.0 for col in FEATURE_COLS}])
+        CHAMPION_MODEL.predict_proba(dummy_row)
+        EXPLAINER.shap_values(dummy_row)
+        logger.info("Warm-up prediction complete.")
+    except Exception as e:
+        logger.warning(f"Warm-up prediction failed (non-fatal, startup continues): {e}")
+
+
 @app.on_event("startup")
 async def load_models():
     global CHAMPION_MODEL, CHALLENGER_MODEL, FEATURE_COLS, GROUP_THRESHOLDS, DEFAULT_THRESHOLD, EXPLAINER, CACHE
 
-    champion_path = ARTIFACTS_DIR / "champion_model.joblib"
-    if champion_path.exists():
-        bundle = joblib.load(champion_path)
-        CHAMPION_MODEL = bundle["model"]
-        FEATURE_COLS = bundle["feature_cols"]
-        GROUP_THRESHOLDS = bundle.get("group_thresholds", {})
-        DEFAULT_THRESHOLD = bundle.get("default_threshold", 0.5)
+    CHAMPION_MODEL, FEATURE_COLS, GROUP_THRESHOLDS, DEFAULT_THRESHOLD = _load_champion()
+    if CHAMPION_MODEL is not None:
         # SHAP's TreeExplainer needs one concrete tree model. If the deployed
         # champion is a FairEnsembleModel (fairness-constrained retraining —
         # see models/train_champion.py), explain via its single highest-weight
@@ -61,6 +98,7 @@ async def load_models():
         # Stage 16 for why that's a documented approximation, not a silent one.
         explainer_model = getattr(CHAMPION_MODEL, "dominant_predictor", CHAMPION_MODEL)
         EXPLAINER = shap.TreeExplainer(explainer_model)
+        _warm_up()
 
     challenger_path = ARTIFACTS_DIR / "challenger_model.joblib"
     if challenger_path.exists():
@@ -83,9 +121,6 @@ def _engineer_features(app_dict: dict) -> pd.DataFrame:
     df["high_util_x_high_leverage"] = (
         (df["avg_cc_utilization"] > 0.8) & (df["credit_income_ratio"] > 5)
     ).astype(int)
-    df["many_loans_x_young"] = (
-        (df["bureau_loan_count"] > 5) & (df["age_years"] < 30)
-    ).astype(int)
     return df
 
 
@@ -102,13 +137,21 @@ def _credit_score(probability: float) -> int:
 
 def _deny_threshold(gender: str | None, age_years: float) -> float:
     """The fairness-calibrated DENY cutoff for this applicant's (gender, age
-    bin) group, or the flat default if the applicant didn't disclose gender
-    or their group wasn't seen during calibration. Never below 0.25, so the
-    MANUAL_REVIEW tier always has room below it regardless of calibration."""
-    if not GROUP_THRESHOLDS or gender is None:
+    bin) group. If the applicant didn't disclose gender, or no calibrated
+    thresholds are loaded, or their group combination wasn't seen during
+    calibration: fall back to the MOST LENIENT calibrated threshold, not the
+    raw model's flat threshold — see explainability.fairness.
+    non_disclosure_threshold's docstring for why (falling back to the flat
+    threshold would quietly reintroduce the age bias non-disclosure exists
+    to sidestep). Never below 0.25, so the MANUAL_REVIEW tier always has
+    room below it regardless of calibration."""
+    if not GROUP_THRESHOLDS:
         return DEFAULT_THRESHOLD
+    fallback = non_disclosure_threshold(GROUP_THRESHOLDS, fallback=DEFAULT_THRESHOLD)
+    if gender is None:
+        return max(0.25, fallback)
     age_bin = age_bin_labels([age_years]).astype(str).iloc[0]
-    return max(0.25, GROUP_THRESHOLDS.get((gender, age_bin), DEFAULT_THRESHOLD))
+    return max(0.25, GROUP_THRESHOLDS.get((gender, age_bin), fallback))
 
 
 def _risk_tier_and_decision(probability: float, deny_threshold: float) -> tuple[str, str]:
@@ -121,7 +164,7 @@ def _risk_tier_and_decision(probability: float, deny_threshold: float) -> tuple[
     return "very_high", "DENY"
 
 
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/predict", response_model=PredictionResponse, dependencies=[Depends(require_api_key)])
 async def predict(application: LoanApplication):
     if CHAMPION_MODEL is None:
         raise HTTPException(status_code=503, detail="Model not loaded — run models/train_champion.py first")
@@ -174,8 +217,11 @@ async def predict(application: LoanApplication):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/batch-score")
+@app.post("/batch-score", dependencies=[Depends(require_api_key)])
 async def batch_score(applications: list[LoanApplication]):
+    # predict() is called as a plain Python function here, not through FastAPI's
+    # routing — its own `dependencies=[Depends(require_api_key)]` doesn't run
+    # in that path, so this endpoint needs (and has) its own auth check above.
     return [await predict(a) for a in applications]
 
 
@@ -197,7 +243,7 @@ async def health():
     }
 
 
-@app.get("/fairness-report")
+@app.get("/fairness-report", dependencies=[Depends(require_api_key)])
 async def fairness_report():
     report_path = ARTIFACTS_DIR / "fairness_report.json"
     if not report_path.exists():
