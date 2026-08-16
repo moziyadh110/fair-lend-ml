@@ -1,0 +1,20 @@
+name: credit_default
+version: '1.0.0'
+config-version: 2
+
+profile: credit_default
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+models:
+  credit_default:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    features:
+      +schema: features
+      +materialized: table

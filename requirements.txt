@@ -1,0 +1,55 @@
+# Data engineering
+pandas==2.3.3
+sqlalchemy==2.0.49
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+pyarrow==24.0.0
+kaggle<1.7               # 2.x dropped kaggle.json auth in favor of OAuth-only login
+
+# Not yet installed/used — great_expectations was swapped for a lightweight
+# pandas validator (see PROGRESS.md Stage 6); fredapi is needed once
+# data_engineering/ingest_fred.py is implemented.
+# great-expectations
+# fredapi
+
+# dbt
+dbt-postgres==1.11.0
+
+# Scale (Phase 2) — not yet installed; features/spark_features.py and
+# features/dask_features.py are still empty stubs.
+# pyspark
+# dask[dataframe]
+
+# Modeling
+scikit-learn==1.8.0
+statsmodels==0.14.6
+xgboost==3.4.1
+lightgbm==4.7.0
+catboost==1.2.10
+h2o==3.46.0.12            # MOJO export requires a paid H2O-3 Secure license now — see PROGRESS.md Stage 13
+optuna==4.9.0
+mlflow==3.15.1
+
+# Explainability & fairness
+shap==0.52.0
+fairlearn==0.14.0
+
+# Serving
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+pydantic==2.12.5
+redis==8.1.0
+
+# Monitoring & orchestration
+evidently==0.7.21
+pyyaml==6.0.3
+streamlit==1.61.1
+
+# Not yet installed — no Airflow scheduler is running (native Airflow isn't
+# supported on Windows outside WSL). dags/credit_default_retrain.py is
+# written and imports `airflow`, but hasn't been executed. See PROGRESS.md.
+# apache-airflow
+
+# Testing
+pytest==9.1.1
+httpx==0.28.1

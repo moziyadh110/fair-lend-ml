@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: stg_applications
+    columns:
+      - name: sk_id_curr
+        tests: [unique, not_null]
+      - name: target
+        tests: [not_null]
+
+  - name: fct_credit_features
+    columns:
+      - name: sk_id_curr
+        tests: [unique, not_null]
+      - name: target
+        tests: [not_null]

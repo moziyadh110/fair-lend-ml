@@ -1,0 +1,36 @@
+alerts:
+  - name: "AUC degradation"
+    metric: "auc_rolling_30d"
+    threshold: 0.65
+    direction: "below"
+    action: "trigger_retrain"
+
+  - name: "Feature drift"
+    metric: "psi_any_top10_feature"
+    threshold: 0.25
+    direction: "above"
+    action: "trigger_retrain"
+
+  - name: "Prediction distribution shift"
+    metric: "psi_prediction_distribution"
+    threshold: 0.20
+    direction: "above"
+    action: "alert_team"
+
+  - name: "Fairness violation"
+    metric: "demographic_parity_gender"
+    threshold: 0.05
+    direction: "above"
+    action: "block_deployment"
+
+  - name: "Latency spike"
+    metric: "prediction_p99_ms"
+    threshold: 100
+    direction: "above"
+    action: "alert_oncall"
+
+  - name: "Error rate"
+    metric: "api_error_rate"
+    threshold: 0.01
+    direction: "above"
+    action: "alert_oncall"

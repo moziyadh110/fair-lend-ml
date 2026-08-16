@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: credit_default
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline123
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  mlflow:
+    build: ./mlflow
+    ports: ["5001:5000"]
+    depends_on: [postgres]
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://pipeline:pipeline123@postgres/credit_default
+
+  api:
+    build: ./serving
+    ports: ["8000:8000"]
+    depends_on: [mlflow, redis]
+    environment:
+      REDIS_HOST: redis
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+
+  dashboard:
+    build: ./dashboard
+    ports: ["8501:8501"]
+    depends_on: [postgres, mlflow]
+
+  airflow:
+    build: ./airflow
+    ports: ["8080:8080"]
+    depends_on: [postgres]
+    volumes: ["./dags:/opt/airflow/dags"]
+
+volumes:
+  pgdata:

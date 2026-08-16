@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# data
+*.csv
+*.parquet
+data/
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# mlflow
+mlruns/
+mlartifacts/
+mlflow.db
+
+# trained model artifacts (reproducible via models/train_champion.py)
+artifacts/
+catboost_info/
+
+# notebooks
+.ipynb_checkpoints/
+
+# os
+.DS_Store
+Thumbs.db
