@@ -20,9 +20,10 @@ mlruns/
 mlartifacts/
 mlflow.db
 
-# trained model artifacts (reproducible via models/train_champion.py)
+# trained model artifacts (reproducible via models/train_champion.py, models/h2o_automl.py)
 artifacts/
 catboost_info/
+models/h2o/
 
 # notebooks
 .ipynb_checkpoints/
