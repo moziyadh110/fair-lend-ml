@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from explainability.fairness import age_bin_labels
+from explainability.fairness import age_bin_labels, non_disclosure_threshold
 
 load_dotenv()
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
@@ -26,11 +26,15 @@ def _deny_thresholds_per_row(gender: pd.Series, age: pd.Series, group_thresholds
     """Same per-group DENY cutoff logic as serving/app.py._deny_threshold,
     vectorized for a whole portfolio — kept in sync deliberately since batch
     and real-time predictions must use the same fairness-calibrated decision,
-    not just the same model."""
+    not just the same model. Rows with a (gender, age_bin) combination not
+    seen during calibration (e.g. the excluded XNA-gender rows) fall back to
+    the most lenient calibrated threshold, not the flat default — same
+    non-disclosure policy as serving/app.py, for the same reason."""
     age_bins = age_bin_labels(age).astype(str)
-    thresholds = np.full(len(gender), default_threshold)
+    fallback = non_disclosure_threshold(group_thresholds, fallback=default_threshold)
+    thresholds = np.full(len(gender), fallback)
     for i in range(len(gender)):
-        t = group_thresholds.get((gender.iloc[i], age_bins.iloc[i]), default_threshold)
+        t = group_thresholds.get((gender.iloc[i], age_bins.iloc[i]), fallback)
         thresholds[i] = max(0.25, t)
     return thresholds
 
