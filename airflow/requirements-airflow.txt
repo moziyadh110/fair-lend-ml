@@ -1,0 +1,16 @@
+# Dependencies for the DAG's task callables (dags/credit_default_retrain.py),
+# installed into Airflow's own image. Kept separate from the project's
+# top-level requirements.txt because Airflow pins its own SQLAlchemy/etc.
+# versions — this file is intentionally looser so pip can resolve versions
+# compatible with Airflow 2.9's own constraints instead of the exact pins
+# used for local development. See PROGRESS.md.
+pandas
+sqlalchemy
+psycopg2-binary
+python-dotenv
+dbt-postgres
+scikit-learn
+catboost
+fairlearn
+evidently
+pyyaml

@@ -46,6 +46,7 @@ def check_and_branch(**context):
     from dotenv import load_dotenv
     from sqlalchemy import create_engine
 
+    from monitoring.alerting import send_alerts
     from monitoring.drift_detector import compute_all_psi, retrain_recommended
 
     load_dotenv()
@@ -63,7 +64,18 @@ def check_and_branch(**context):
     cols = ["credit_income_ratio", "avg_cc_utilization", "bureau_debt_ratio", "late_payment_rate"]
     psi = compute_all_psi(df.iloc[:midpoint], df.iloc[midpoint:], cols)
 
-    return "retrain_model" if retrain_recommended(psi) else "skip_retrain"
+    if retrain_recommended(psi):
+        drifted = {name: r["psi"] for name, r in psi.items() if r["status"] == "retrain"}
+        send_alerts([{
+            "name": "Feature drift",
+            "metric": "psi_any_top10_feature",
+            "threshold": 0.25,
+            "direction": "above",
+            "action": "trigger_retrain",
+            "current_value": max(drifted.values()),
+        }])
+        return "retrain_model"
+    return "skip_retrain"
 
 
 def train_and_register():
