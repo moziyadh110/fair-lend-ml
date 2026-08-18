@@ -23,6 +23,7 @@ services:
     build: ./serving
     ports: ["8000:8000"]
     depends_on: [mlflow, redis]
+    env_file: .env   # API_KEY, POSTGRES_*, FRED_API_KEY
     environment:
       REDIS_HOST: redis
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -36,7 +37,23 @@ services:
     build: ./airflow
     ports: ["8080:8080"]
     depends_on: [postgres]
-    volumes: ["./dags:/opt/airflow/dags"]
+    # Whole project mounted (not just dags/) — the DAG's task callables import
+    # project modules directly (data_engineering, models, monitoring, serving),
+    # and each file resolves its own project root via Path(__file__).resolve().
+    volumes: ["./:/opt/airflow/project"]
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # Overrides whatever POSTGRES_HOST is set to in the mounted .env — inside
+      # this container Postgres is reachable at the Compose service name, not
+      # localhost. python-dotenv's load_dotenv() doesn't override vars already
+      # set in the environment, so this wins over .env's value.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    working_dir: /opt/airflow/project
+    command: standalone
 
 volumes:
   pgdata:
