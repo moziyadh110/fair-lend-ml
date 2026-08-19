@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: credit_default
+          POSTGRES_USER: pipeline
+          POSTGRES_PASSWORD: pipeline123
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pipeline"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline123
+      POSTGRES_DB: credit_default
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # No Kaggle credentials / ~2.6GB dataset in CI — tests that need the
+      # real CSVs or a trained model artifact skip themselves (see
+      # tests/test_pipeline.py, tests/test_serving.py, tests/test_shap_explainer.py).
+      # This still exercises every test that runs on synthetic data: fairness
+      # audit logic, WoE encoding, credit metrics, monitoring/alerting,
+      # tuning, adverse-action codes, FRED ingestion parsing, scale features.
+      - name: Run tests
+        run: pytest tests/ -v
+
+  dbt-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dbt
+        run: pip install dbt-postgres==1.11.0
+
+      # Validates every model/macro/Jinja reference compiles without needing
+      # a live database or the raw source tables — catches SQL syntax errors
+      # and broken ref()/source() calls without downloading any data.
+      - name: dbt parse
+        working-directory: data_engineering/dbt_project
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: pipeline
+          POSTGRES_PASSWORD: pipeline123
+          POSTGRES_DB: credit_default
+        run: dbt parse --profiles-dir .
