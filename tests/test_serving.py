@@ -1,9 +1,12 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+load_dotenv()
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 
@@ -11,6 +14,8 @@ pytestmark = pytest.mark.skipif(
     not (ARTIFACTS_DIR / "champion_model.joblib").exists(),
     reason="Run models/train_champion.py first to produce artifacts/champion_model.joblib",
 )
+
+AUTH_HEADERS = {"X-API-Key": os.environ.get("API_KEY", "")}
 
 
 @pytest.fixture
@@ -64,7 +69,7 @@ def test_health_reports_model_loaded(client):
 
 
 def test_predict_returns_valid_response(client):
-    resp = client.post("/predict", json=VALID_APPLICATION)
+    resp = client.post("/predict", json=VALID_APPLICATION, headers=AUTH_HEADERS)
     assert resp.status_code == 200
     body = resp.json()
     assert 0 <= body["default_probability"] <= 1
@@ -74,13 +79,13 @@ def test_predict_returns_valid_response(client):
 
 def test_predict_rejects_absurd_credit_amount(client):
     bad_app = dict(VALID_APPLICATION, amt_credit=VALID_APPLICATION["amt_income_total"] * 200)
-    resp = client.post("/predict", json=bad_app)
+    resp = client.post("/predict", json=bad_app, headers=AUTH_HEADERS)
     assert resp.status_code == 422
 
 
 def test_predict_is_cached_on_repeat_request(client):
-    r1 = client.post("/predict", json=VALID_APPLICATION)
-    r2 = client.post("/predict", json=VALID_APPLICATION)
+    r1 = client.post("/predict", json=VALID_APPLICATION, headers=AUTH_HEADERS)
+    r2 = client.post("/predict", json=VALID_APPLICATION, headers=AUTH_HEADERS)
     assert r1.json()["application_id"] == r2.json()["application_id"]  # cache hit returns identical response
 
 
@@ -94,7 +99,7 @@ def test_high_risk_application_gets_adverse_action_reasons(client):
         late_payments=10,
         prev_refused=3,
     )
-    resp = client.post("/predict", json=risky_app)
+    resp = client.post("/predict", json=risky_app, headers=AUTH_HEADERS)
     body = resp.json()
     if body["decision"] in ("DENY", "MANUAL_REVIEW"):
         assert len(body["adverse_action_reasons"]) > 0
@@ -117,5 +122,27 @@ def test_deny_thresholds_differ_by_age_group_proving_mitigation_is_live(client):
 def test_undisclosed_gender_falls_back_to_default_threshold(client):
     app_no_gender = dict(VALID_APPLICATION)
     app_no_gender.pop("code_gender", None)
-    resp = client.post("/predict", json=app_no_gender)
+    resp = client.post("/predict", json=app_no_gender, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+
+
+def test_predict_without_api_key_is_rejected(client):
+    resp = client.post("/predict", json=VALID_APPLICATION)  # no headers
+    assert resp.status_code == 401
+
+
+def test_predict_with_wrong_api_key_is_rejected(client):
+    resp = client.post("/predict", json=VALID_APPLICATION, headers={"X-API-Key": "wrong-key"})
+    assert resp.status_code == 401
+
+
+def test_health_does_not_require_api_key(client):
+    resp = client.get("/health")  # no auth header, and none required by design
+    assert resp.status_code == 200
+
+
+def test_fairness_report_requires_api_key(client):
+    resp = client.get("/fairness-report")
+    assert resp.status_code == 401
+    resp = client.get("/fairness-report", headers=AUTH_HEADERS)
     assert resp.status_code == 200

@@ -195,3 +195,25 @@ def test_fair_ensemble_model_is_picklable():
 
     restored = pickle.loads(pickle.dumps(wrapped))
     assert np.allclose(wrapped.predict_proba(X), restored.predict_proba(X))
+
+
+def test_non_disclosure_threshold_is_most_lenient():
+    from explainability.fairness import non_disclosure_threshold
+
+    thresholds = {("F", "18-30"): 0.7, ("M", "18-30"): 0.4, ("F", "60+"): 0.6}
+    assert non_disclosure_threshold(thresholds) == 0.4
+
+
+def test_non_disclosure_threshold_falls_back_when_empty():
+    from explainability.fairness import non_disclosure_threshold
+
+    assert non_disclosure_threshold({}, fallback=0.55) == 0.55
+
+
+def test_apply_group_thresholds_defaults_to_lenient_fallback_for_unseen_group():
+    thresholds = {("F", "18-30"): 0.8, ("M", "18-30"): 0.3}
+    proba = np.array([0.5])  # would fail against 0.8, but the unseen group here should use 0.3
+    gender = np.array(["X"])  # not in the dict
+    age = np.array([25])
+    pred = apply_group_thresholds(proba, gender, age, thresholds)  # no default_threshold passed
+    assert pred[0] == 1  # 0.5 >= 0.3 (the lenient fallback), so denied
