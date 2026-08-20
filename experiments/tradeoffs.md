@@ -29,7 +29,25 @@ The Step 3 baseline (WoE-encoded logistic regression scorecard) scored **AUC 0.7
 
 **Step 3 — fix the decision.** Deterministic per-(gender, age-group) decision thresholds (not Fairlearn's `ThresholdOptimizer`, which randomizes decisions for some applicants near the boundary — a fair-lending problem in its own right). Calibrated on train, validated on held-out test: DP gap 0.456→0.0102 (age), 0.029→0.0015 (gender). Live in both the real-time API and batch scoring.
 
-**Step 4 — try fixing the model itself, and let the numbers decide.** Retrained with `ExponentiatedGradient` fairness constraints baked in. Real result: age gap fell 6.6x (0.456→0.069) from training alone, but didn't clear 0.05 and cost 4.1 AUC points at the training budget used — so the system automatically kept the more accurate raw model with post-hoc correction rather than deploying the "architecturally cleaner" option that measurably underperformed.
+**Step 4 — try fixing the model itself, and let the numbers decide.** Retrained with `ExponentiatedGradient` fairness constraints baked in, at two different budgets:
+
+| | AUC cost vs. raw | DP gap (age) |
+|---|---|---|
+| Reduced budget (150 iter, 10 rounds) | 0.041 | 0.069 |
+| Full budget (500 iter, 50 rounds, 26 min) | **0.014** | **0.093** |
+
+More training capacity recovered almost all the AUC cost — but the age gap got *worse*, not better, at the fuller budget. Reported both numbers rather than only the flattering one: `ExponentiatedGradient` optimizes error subject to a constraint, it doesn't guarantee fairness improves monotonically with more compute. Neither run cleared the 0.05 threshold on its own, so the system kept the more accurate raw model with post-hoc correction both times — now backed by two independent real attempts, not one.
+
+**Step 5 — check the model's own input list against the stated design, not just its outputs.** Four stages of fairness work (Steps 1-4 above) treated the age gap as something the model was *inferring* from correlated signals. A `corrwith()` check against the protected attribute — the check that should have happened before any of Steps 1-4 — found `age_years` was a raw model feature the whole time, directly contradicting this project's own documented design ("protected attributes... excluded from the model's feature set"). Removed it (plus a second feature explicitly gated on `age_years < 30`) and retrained everything:
+
+| | Raw model `dp_age` | Constrained model `dp_age` | Constrained AUC cost |
+|---|---|---|---|
+| Before (age_years in model) | 0.456 | 0.069 / 0.093 (2 attempts, neither passed) | 0.041 / 0.014 |
+| After (age_years removed) | **0.408** | **0.038 — passes on its own** | 0.023 |
+
+The same reduced-budget `ExponentiatedGradient` configuration that failed twice now passes cleanly, for one reason: it was no longer fighting a model with an unconstrained direct channel to discriminate on age. Still not deployed over the post-hoc-corrected raw model — 0.023 is just above this project's pre-set 0.02 acceptance rule, and that rule doesn't get relaxed after the fact to fit one good result.
+
+**Interview answer:** "I audited the fairness *metrics* rigorously for four stages before I thought to audit the *feature list* — checking whether the model's actual inputs matched what my own documentation claimed. They didn't: age was a raw input the whole time. That's the kind of blind spot that survives a lot of downstream rigor if you never go back and check the premise. Once I fixed it, a fairness-constrained retrain that had failed twice passed on the first try — which told me the earlier failures weren't a tuning problem, they were a scope problem."
 
 **Interview answer:** "This went through four real iterations, not one. First I found the compliance metric itself was corrupted by a placeholder data category — fixed that before trusting any number. Then I found the gate was only checking gender and silently ignoring a much larger age disparity — fixed the gate itself. Then I built a deterministic, non-randomized per-group threshold correction and proved it works at portfolio scale, not just in a test split. Then I tried the 'proper' fix — baking fairness into the model via constrained retraining — and it genuinely helped, but didn't beat the post-hoc approach on this run's numbers, so I kept what actually won instead of what sounded better. Every one of those decisions came from measuring, not assuming."
 
