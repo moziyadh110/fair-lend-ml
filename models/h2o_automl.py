@@ -14,8 +14,14 @@ from h2o.automl import H2OAutoML
 
 def run_automl(train_df, feature_cols, target_col="target",
                 max_runtime_secs: int = 300, max_models: int = 10,
-                model_path: str = "models/h2o/"):
-    h2o.init()
+                model_path: str = "models/h2o/", max_mem_size: str = "1500m"):
+    # h2o.init()'s default JVM heap on this host is tiny (~247MB free,
+    # 0 allowed cores reported) — the same practical ceiling found for Spark
+    # (a 32-bit-style JVM that can't represent a 4g heap request; 1200m/1500m
+    # is close to the real usable max). Without this, GBM/DRF fail outright
+    # ("tree model will not fit in the driver node's memory") and only GLM
+    # — the cheapest algorithm — survives, which isn't a fair AutoML comparison.
+    h2o.init(max_mem_size=max_mem_size)
     train_h2o = h2o.H2OFrame(train_df[feature_cols + [target_col]])
     train_h2o[target_col] = train_h2o[target_col].asfactor()
 
