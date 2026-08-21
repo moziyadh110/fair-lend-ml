@@ -358,16 +358,204 @@ Fairlearn's `ExponentiatedGradient` doesn't produce a single model — it produc
 
 ---
 
+---
+
+## Stage 17 — The improvement-list work: items #1–#5 (HLD/LLD)
+
+User asked "what can we do to improve from last time," got a prioritized list back, then said "go one by one and complete all from 1-5." This stage covers all five, in order, including two real infrastructure blockers hit and fixed along the way.
+
+### Item #1: full-budget `ExponentiatedGradient` run — real result, didn't change the conclusion
+Ran the constrained retrain at the champion's own settings (500 iterations, up to 50 rounds — vs. the reduced 150/10 from Stage 16) via `experiments/full_fairness_retrain.py`. 26 minutes, 21 sub-estimators fitted (6 with nonzero weight).
+
+| | Reduced budget (Stage 16) | Full budget |
+|---|---|---|
+| AUC cost vs. raw champion | 0.041 | **0.014** (now within the ≤0.02 rule) |
+| DP gap (age) | 0.069 | **0.093** (worse, not better) |
+
+**Non-monotonic, and reported honestly rather than picking whichever framing looked better.** More training capacity bought back almost all the AUC cost, but the age fairness gap got *worse*, not better — Fairlearn's reduction algorithm optimizes error subject to the constraint, not "improve fairness monotonically with more compute." Since `demographic_parity_pass` still fails at full budget too, the deployed system's decision (raw model + post-hoc thresholds) doesn't change — but this is now backed by two independent real attempts at different budgets, not one.
+
+### Item #2: Airflow — built, deployed, actually executed a real DAG run
+- `airflow/Dockerfile` (official `apache/airflow:2.9.2-python3.11` base + `airflow/requirements-airflow.txt` for the DAG's own dependencies) and a `docker-compose.yml` `airflow` service (whole project mounted at `/opt/airflow/project`, `command: standalone`, `POSTGRES_HOST=postgres` overriding the mounted `.env`'s `localhost` value since python-dotenv doesn't override already-set env vars).
+- **Hit a real disk-full blocker mid-build** — Docker had accumulated 65GB of images and 48GB of build cache across *all* projects on this machine, not just this one, leaving 1.8GB free. `docker system prune` only reclaimed space inside Docker's own virtual disk (a known WSL2/Docker Desktop quirk — the backing `.vhdx` doesn't auto-shrink); actually freeing Windows disk space required the user to compact it manually, which they did.
+- **Hit what looked like a hang, wasn't one** — after starting, the container spent ~10 minutes logging repeated `AttributeError: module 'lib' has no attribute 'GEN_EMAIL'` warnings (a `cryptography`/`pyOpenSSL` version mismatch from our extra pip installs colliding with Airflow's own pinned providers — specifically breaking the SFTP/Snowflake provider imports, which this project doesn't use). Verified it wasn't actually stuck by checking `docker stats` (real CPU activity) and, decisively, `curl localhost:8080/health` returning `200` — the webserver was up the whole time; the log noise was cosmetic.
+- **Real DAG execution, not just an import test:** unpaused and triggered `credit_default_retrain` via `airflow dags trigger`. Full run completed in ~2.5 minutes: `dbt_run` → `validate_data` → `check_drift` → branched to `skip_retrain` (correctly — no drift on a same-population reference/current split) → `batch_score_portfolio`. Every task `success`.
+- **What this proves that wasn't proven before:** the DAG's Python callables aren't just syntactically valid, they actually import and execute the real project modules (dbt subprocess call, `data_engineering.validation`, `monitoring.drift_detector`, `serving.batch_predict`) inside a genuinely separate Airflow-managed process, end to end.
+
+### Item #3: `spark_features.py` / `dask_features.py` — built with real features, hit three real environment bugs
+Built two genuinely new, non-placeholder features: a per-applicant payment-trend slope via Spark (`groupBy().apply()` + `numpy.polyfit`, on `installments_payments.csv`) and a rolling credit-utilization-volatility feature via Dask (`credit_card_balance.csv`). Both are the "20% of features awkward in SQL" the plan calls for — a per-group regression slope and a per-group rolling statistic aren't natural dbt/SQL operations.
+
+Three real bugs surfaced and fixed, in order:
+1. **`pyspark==4.2.0` requires Java 11+; this machine has Java 8.** First symptom was a red herring (`Invalid maximum heap size: -Xmx4g` — this machine's JVM turned out to be a 32-bit HotSpot Client VM with a ~256MB default heap ceiling, so a 4g request couldn't even be represented). Reducing to `512m` didn't fix it — the real error underneath was `TypeError: 'JavaPackage' object is not callable` on `SparkSession` construction, the classic symptom of a Java/Spark version mismatch. **Fixed by pinning `pyspark==3.5.6`** (last major line supporting Java 8), not by chasing the misleading heap-size symptom further.
+2. **Stale `PYSPARK_PYTHON` env var** on this machine pointed at a conda environment (`C:\Users\moham\anaconda3\envs\pyspark\python.exe`) that no longer exists — Spark's worker subprocess launch failed with `CreateProcess error=2`. Fixed by having `spark_features.py` set `PYSPARK_PYTHON`/`PYSPARK_DRIVER_PYTHON` to `sys.executable` itself, before importing `pyspark.sql` — makes the script self-contained regardless of whatever else is set in the host shell, rather than requiring the user to fix their environment.
+3. **My own test had a sign error** — `test_slope_udf_detects_declining_payments` asserted `slope > 0` for a scenario where payments decline as `days_instalment` rises toward 0, which is a *negative* slope by construction. Caught by actually running the test rather than assuming the assertion was right because the function name matched the intent.
+
+Real jobs run against real data: Dask computed `utilization_volatility` for 103,558 applicants; Spark's payment-trend slope job is running as of this stage (see next update if still in progress when this was written).
+
+### Item #4: non-disclosure fairness policy — the old fallback was actively worse than doing nothing
+Flagged in Stage 15/16 as an open item: applicants who don't disclose gender fell back to `DEFAULT_THRESHOLD` — the *raw model's own flat threshold*, i.e. exactly the one Stage 14 showed produces a 0.456 age gap. Non-disclosure was silently reintroducing the bias the whole calibration exists to remove.
+
+**Fix:** `explainability.fairness.non_disclosure_threshold(thresholds)` returns the *most lenient* (lowest) threshold among all calibrated groups. An applicant who doesn't disclose is now judged at least as favorably as the best-treated disclosed group — non-disclosure can only help, never hurt, relative to the fairness-corrected population. This is a "benefit of the doubt" policy choice, not a mathematical fairness proof, and it has a real cost: it means the disclosed population's denial rate has to absorb slightly more to keep the portfolio-wide rate on target. Wired into `serving/app.py`'s `_deny_threshold`, `serving/batch_predict.py`'s `_deny_thresholds_per_row`, and `apply_group_thresholds`'s own default (was hardcoded `0.5`, now defaults to calling `non_disclosure_threshold` unless a caller explicitly overrides it).
+
+### Item #5: XNA filter applied to `experiments/compare.py`'s comparison table
+Flagged in Stage 11 as not-yet-done. Added the same `df[df["_protected_gender"] != "XNA"]` filter already used in `models/train_champion.py`. Re-ran the full 5-model comparison: every model's DP-gender gap dropped by roughly the same 6-10x factor Stage 11 found for CatBoost alone (e.g. CatBoost 0.191→0.029, XGBoost 0.262→0.028, Random Forest 0.311→0.032) — confirming the XNA-outlier effect wasn't specific to one model, it was inflating the whole table. Champion selection (CatBoost) doesn't change. `experiments/comparison_results.csv` now holds the corrected numbers; Stage 10's table above is left as the historical record of what was actually run at the time, per this file's own "don't rewrite history" convention.
+
+---
+
+---
+
+## Stage 18 — The actual root cause: age was a raw model input the whole time (HLD)
+
+User asked for a time estimate on closing the remaining gaps, ordered them "1→3→2→4→5→8". Item #1 (fix the core model bias) started with checking which features correlate with age before jumping to another `ExponentiatedGradient` run — and that check found something more direct than a proxy.
+
+### Finding: `age_years` was a raw feature fed straight into the model
+`models/train_baseline.py`'s `FEATURE_COLS` (shared by the WoE baseline and every challenger model, including the champion) included `age_years` directly. Every doc in this project — `MODEL_CARD.md`, `README.md`, `METHODOLOGY.md` — states "protected attributes (`code_gender`, `age_years`, `name_family_status`) are carried for audit but excluded from the model's feature set." That claim was false for `age_years` since the feature list was first written, through every stage of this project's fairness work (Stages 11, 14, 15, 16, and the Stage 17 improvement pass) — nobody had actually checked whether the stated exclusion was real. A `corrwith()` check against `_protected_age` surfaced it immediately: `age_years` correlated 1.0 with itself, meaning it was quite literally in the model's own input list.
+
+**A second, related issue found the same way:** `many_loans_x_young`, one of the two engineered interaction features, is defined as `bureau_loan_count > 5 AND age_years < 30` — an explicit age-gated rule baked into a feature, not just a correlate of age. Its IV was 0.006 (essentially no signal), so excluding it cost nothing.
+
+### Why this is a bigger problem than any proxy feature, and why it went unnoticed this long
+All of Stages 14-17's fairness work treated the age bias as something the model was *inferring* from correlated signals (`years_employed`, `bureau_loan_count`, etc.) — a genuinely hard problem needing either post-hoc correction or constrained retraining, because the model was earning the disparity from real (if legally fraught) correlations. That framing was only half right: some of the disparity was the model directly discriminating on age, no inference involved. Every prior audit stage kept auditing the *output* (predictions, fairness metrics) without ever checking the *input list* against what the documentation claimed. The methodology was rigorous about verifying claims everywhere except the one place it mattered most — its own stated design principle.
+
+### Fix and result
+Removed both features from `FEATURE_COLS`. Retrained baseline and champion:
+
+| | Before (age_years included) | After (excluded) |
+|---|---|---|
+| WoE baseline AUC | 0.701 | 0.696 (cost: 0.005) |
+| Raw CatBoost AUC | 0.724 | 0.722 (cost: 0.003) |
+| Raw CatBoost `dp_age` | 0.464 | **0.408** |
+
+Small accuracy cost, meaningful fairness improvement on the raw model alone — but the more important result is what it unlocked for constrained retraining:
+
+| | Stage 16 (age_years still in model) | Stage 18 (age_years removed) |
+|---|---|---|
+| Constrained-model `dp_age` | 0.069 / 0.093 (two attempts, neither passed) | **0.038 — passes on its own** |
+| Constrained-model AUC cost | 0.041 / 0.014 | 0.023 |
+
+**The same reduced-budget `ExponentiatedGradient` configuration that failed twice at Stage 16 now passes the fairness gate cleanly, without any post-hoc correction, once the direct age input was removed first.** This is strong evidence the earlier constrained-retraining failures weren't (only) a budget/convergence problem — they were fighting a harder problem than necessary, because the model had a direct, unconstrained channel to discriminate on age that no amount of post-processing on gender+age *combinations* was addressing at its root.
+
+### Still deployed: raw model + post-hoc thresholds, not the constrained model
+0.023 AUC cost is just above this project's own 0.02 acceptance rule for swapping in the constrained model, so `models/train_champion.py`'s existing decision logic (unchanged) still deploys the raw model with deterministic per-group thresholds on top — which now passes even more cleanly than before (`dp_gender` 0.0019, `dp_age` 0.0128). Not relaxing the 0.02 rule to fit this specific result — the rule was set before any of these numbers existed, precisely so a close call afterward doesn't get rationalized into a pass. Worth revisiting only as its own deliberate decision, not as a side effect of wanting this particular experiment to look better.
+
+### Lesson for the process itself, not just the model
+This is worth stating plainly: a fairness audit that never checks its own model's input list against its own stated exclusions has a blind spot no amount of downstream metric-checking can cover. Every future fairness-relevant feature change should include a `corrwith()` (or equivalent) pass against every protected attribute *and* a literal read of `FEATURE_COLS` against the documented exclusion list — not just a re-run of the audit metrics.
+
+---
+
+---
+
+## Stage 19 — Real MLflow Model Registry, three unrelated environment bugs deep (LLD)
+
+Item #4 from the improvement list. Builds `models/registry.py`: register the deployed champion, gate promotion on real metrics, alias it `champion`, and load it that way from serving — replacing the local-joblib-only approach from Stage 12 with the real thing this time.
+
+### No Docker mlflow service needed after all
+Stage 12 skipped building the plan's `mlflow` Docker service because it "needs a database-backed tracking store." Checking MLflow 3.x's actual default tracking URI found it's already `sqlite:///mlflow.db` — a real database, already registry-capable, with zero extra infrastructure. The Docker service from the original plan was never necessary for this project's scale; skipped as unneeded, not as deferred work.
+
+### Aliases, not stages
+MLflow deprecated stage-based promotion (`Production`/`Staging`) in favor of aliases (`set_registered_model_alias`) in 2.9+. Used aliases — `champion` — which also happens to be the exact vocabulary this project already uses everywhere else (`models/train_champion.py`, the whole champion/challenger framing in `serving/app.py`). Not a compromise; the modern API fit better than the deprecated one the plan sketched.
+
+### Three unrelated environment bugs, found and fixed in sequence
+1. **A broken, irrelevant `torch` install crashed `mlflow.sklearn.log_model`.** `torch` isn't a dependency of this project — some other tool on this machine left a broken install (missing VC++ redistributable DLLs) behind. `mlflow.sklearn.log_model` triggers scikit-learn's array-API-backend discovery, which does a `pkgutil` walk that imports every backend it knows about, including torch — and the broken DLL load crashed the whole walk with an unrecoverable `OSError`, not the `ImportError` the walk is designed to catch and skip past.
+   - First fix attempt — `sys.modules["torch"] = None` — worked for scikit-learn's walk (which catches `ImportError`/`ModuleNotFoundError`) but broke a *different* mlflow function (`convert_metric_value_to_float_if_torch_tensor`) that just checks `"torch" in sys.modules`, which is `True` even for a poisoned `None` entry. Two different pieces of code checked "is torch present" two different ways, and one poisoning trick could only satisfy one of them.
+   - Real fix: a `sys.meta_path` finder (`_BlockBrokenTorch`) that intercepts `import torch` and raises a clean `ModuleNotFoundError` before Python ever reaches the real, broken `torch/__init__.py`. Torch genuinely never appears in `sys.modules` under this approach, so every caller — regardless of which presence check it uses — sees the same, correct "not installed" answer.
+2. **MLflow's `skops`-based serialization refused to save a `CatBoostClassifier`.** MLflow 3.x's sklearn flavor uses `skops` instead of raw pickle (a real security improvement — skops maintains an allowlist of trusted types rather than blindly unpickling anything). CatBoost isn't a standard sklearn type, so it was rejected by default. Fixed by passing `skops_trusted_types=["catboost.core.CatBoostClassifier", "explainability.fairness.FairEnsembleModel"]` explicitly — both of this project's possible champion types, trusted deliberately, not by disabling the check.
+3. **The test suite itself silently overwrote the real production champion.** `tests/test_registry.py`'s tests registered dummy models under the exact same `credit_default` model name and `champion` alias used by the real `models/train_champion.py` registration — because both pointed at the same default `sqlite:///mlflow.db`. Running the full test suite after the real registration replaced the real CatBoost champion with a test `LogisticRegression` dummy, which then broke `serving/app.py` at startup (SHAP's `TreeExplainer` doesn't support `LogisticRegression`, so `test_serving.py` failed with a confusing, seemingly-unrelated error). Fixed with an `autouse` pytest fixture that points every test in that file at its own `tmp_path`-scoped SQLite database, so tests can never again collide with production registry state. Re-registered the real champion afterward and confirmed `test_serving.py` passes end-to-end using the model loaded through the registry, not just the joblib fallback.
+
+### What's live now
+`serving/app.py` tries `mlflow.sklearn.load_model("models:/credit_default@champion")` first (plus its serving metadata — feature columns, calibrated group thresholds — logged alongside it as a JSON artifact in the same run), falling back to the local joblib artifact only if nothing's been promoted yet. `models/train_champion.py` registers and conditionally promotes automatically at the end of every training run, gated on the same `cleared_for_production` flag and a minimum AUC — a model that fails the fairness gate gets registered (so it's not lost) but never gets the `champion` alias, so serving never picks it up.
+
+Full test suite: 59/59 passing, including 4 new registry tests and confirmation that the real champion (not a test artifact) is what `serving/app.py` actually loads.
+
+---
+
+---
+
+## Stage 20 — Item #5: race/ethnicity fairness coverage — a scope call, not a fix (HLD)
+
+Checked before writing anything off: does the Home Credit dataset have *anything* usable for race/ethnicity fairness auditing, even indirectly?
+
+**Checked the actual columns.** `application_train.csv`'s header has no surname or any name field (applicants are anonymized numeric IDs, `SK_ID_CURR`), no nationality or country-of-origin field, and no direct race/ethnicity field. The "region" columns (`REGION_POPULATION_RELATIVE`, `REGION_RATING_CLIENT`, `REG_REGION_NOT_LIVE_REGION`, etc.) are anonymized relative-population and rating codes, not real geography — no ZIP code, no census tract, nothing a geocoder could resolve to an actual place.
+
+**Why this rules out the standard method, not just makes it harder.** BISG (Bayesian Improved Surname Geocoding) — the method US regulators and lenders actually use to estimate race/ethnicity for fair-lending self-testing when it isn't self-reported — needs exactly the two things this dataset doesn't have: a surname to check against Census surname-race distributions, and a geography (tract/ZIP) to check against Census race-by-area data. Without either input, there's no defensible way to even estimate the missing attribute, let alone audit fairness against it.
+
+**Decision: don't attempt it, and say so plainly rather than build something that looks like coverage but isn't.** A synthetic or fabricated proxy (e.g., randomly assigning race labels, or inferring from unrelated features) would produce numbers that look like a fairness audit without being one — actively worse than admitting the gap, since a fabricated "passing" audit could be mistaken for real assurance. The honest position, stated in `MODEL_CARD.md`: this model's fairness audit covers gender and age because those are the only protected attributes available in this dataset, and race/ethnicity — arguably the attribute regulators scrutinize most under ECOA/HMDA — has zero coverage here. That's a real, material limitation of *this dataset*, not something further engineering effort on this codebase can close.
+
+**What would actually close it:** a different or supplementary dataset with real geography and (ideally) self-reported race/ethnicity — e.g., HMDA data, which self-reports race/ethnicity directly and is the actual dataset regulators use for this kind of analysis. Out of scope for this project's current data source, flagged here so it isn't quietly forgotten.
+
+---
+
+---
+
+## Stage 21 — Item #8: load testing — first real latency numbers for this API
+
+Nothing had ever actually measured `/predict`'s latency before — the dashboard/README's speed claims (going back to the original plan's "single-digit ms MOJO" framing, itself abandoned in Stage 12/13) were aspirational, not measured. Built `serving/load_test.py` (async `httpx`, no new dependency) and ran it for real against a live `uvicorn` instance.
+
+### First result was confusing, investigated rather than reported as-is
+500 requests / 50 concurrency, identical payload: p50 507ms, p95 785ms, p99 845ms, 0 errors. Since every request used the exact same application, and Redis caches identical inputs, this looked wrong — most of those 500 requests should have been near-instant cache hits.
+
+**Diagnosed with two cheap, targeted checks instead of writing up the confusing number:**
+1. **5 sequential identical requests:** 1st = 2105ms, 2nd-5th = 15-22ms. Confirms caching genuinely works (~100x speedup) — the load test's number was misleading, not the caching.
+2. **20 requests with varied payloads** (defeats caching, isolates true per-request cost): 1st = 2398ms, remaining 19 averaged **134ms**.
+
+**Explanation:** the original 50-concurrency test created a "thundering herd" — 50 requests racing on the *same, still-empty* cache key simultaneously at test start, so a meaningful fraction of the 500 requests hit the slow uncached path (each ~100-300ms, occasionally the ~2s cold-start cost), pulling the percentiles up even though the *majority* of individual requests, run cleanly, are fast.
+
+### Real numbers, going forward
+| | Latency |
+|---|---|
+| Cold start (first inference ever, after process start) | ~2.1-2.4s (one-time) |
+| Steady-state, uncached | ~85-300ms, mean 134ms |
+| Cached (identical repeat application) | ~15-20ms |
+
+**134ms uncached is fine for a real-time lending decision** (well under typical UX latency budgets), and the cache gives a large win for the realistic case of a user resubmitting or an operator re-querying the same application. **The ~2.3s cold-start cost is a real operational consideration** — the first request after a deploy or restart pays it — and a production rollout would want a warm-up health check that fires one dummy prediction before accepting real traffic, so the first real customer never eats that cost. Not implemented here (out of scope for a load-test finding), flagged as the concrete follow-up.
+
+**Why this matters beyond the numbers:** the dashboard and README have been asserting latency characteristics since early in this project without ever measuring them. This is the first actual evidence backing (or correcting) those claims — and it took investigating a confusing initial result rather than accepting it, same discipline as every fairness-metric investigation in this log.
+
+---
+
+---
+
+## Stage 22 — Closing out the remaining flagged items (LLD)
+
+User asked to close the remaining gaps from Stage 21's list. Covers what actually needed doing (and one deliberate non-change):
+
+### Cold-start warm-up — implemented
+`serving/app.py` now fires one dummy all-zero prediction (through both the model and the SHAP explainer) at the end of the startup event, wrapped in a try/except so a warm-up failure can't take the service down. Verified via `tests/test_serving.py`'s existing suite (11/11 still pass with the added startup work).
+
+### H2O AutoML re-run — real memory constraint found and fixed
+The original 240s/1-model result wasn't just a time-budget problem: `h2o.init()` was defaulting to ~247MB free memory and 0 allowed cores on this host (same practical-ceiling pattern already found for Spark's JVM). GBM failed outright with "tree model will not fit in the driver node's memory." Added an explicit `max_mem_size` parameter (default `1500m`) to `models/h2o_automl.py`'s `run_automl`. Re-ran at 600s/1500m: GBM completed this time (AUC 0.701) — a real, defensible comparison point now, still below the CatBoost champion (0.7215) and every other tree model from Step 4. Verdict: H2O AutoML doesn't beat purpose-tuned gradient boosting here, and that's now backed by an actual multi-model leaderboard, not a single degenerate GLM run.
+
+### Alerting notification sink — implemented and wired into the DAG
+`monitoring/alerting.py` gained `send_alerts()` (POSTs to a Slack incoming webhook via `requests` — no new dependency) and `format_alert_message()`. No-ops safely if `SLACK_WEBHOOK_URL` isn't configured, so it's safe to wire in everywhere without requiring every environment to have a real webhook. Wired into `dags/credit_default_retrain.py`'s `check_and_branch`: a drift-triggered retrain now also fires a real alert. Confirmed the DAG still loads with no import errors via `airflow dags list` against the live container. 4 new tests (message formatting, no-op-without-webhook, and a mocked-webhook POST verification).
+
+### `environment.yml` — removed, not filled in
+The open decision already leaned toward `requirements.txt` as authoritative; the file itself was still an empty 0-byte stub. Deleted it rather than either leaving a confusing empty file or investing in a second, parallel dependency spec nothing uses.
+
+### Kaggle CLI pin (`kaggle<1.7`) — confirmed, not changed
+Nothing in this project currently needs the 2.x CLI's features, and the pin has worked reliably since Stage 2. Revisiting it now would be effort spent on a non-problem. Closing this open item with "confirmed no action needed" rather than leaving it open indefinitely or forcing an unnecessary upgrade.
+
+### The 0.02 AUC-cost acceptance threshold — confirmed, not changed
+Deliberately revisited (not just left alone by default) now that a constrained candidate exists at 0.023, just above it. The reasoning: this project's own foundational tradeoff framing (`experiments/tradeoffs.md` Tradeoff 1, itself echoing the original plan's worked example of accepting a ~2-point AUC cost for regulatory compliance) already establishes "roughly 2 AUC points" as the deliberate line between an acceptable and unacceptable fairness-accuracy tradeoff — independent of any specific model result. 0.023 sitting just barely above 0.02 is exactly the scenario this rule exists to resolve without relitigating: close enough to look tempting to wave through, which is precisely why the rule was fixed *before* any result existed. Kept at 0.02. If this gets revisited for real, it should be from a fresh cost-benefit analysis (e.g. an actual dollar estimate of 0.02 AUC's worth in missed defaults vs. the value of a bias-free model), not from one experiment landing close to the line.
+
+### Spark job on Linux — six real failures deep, then a genuine success
+Building a one-off Linux container (`python:3.11-slim` + JRE, `docker run --rm` joined to the project's Docker network) to actually run `spark_features.py` outside this Windows host, in pursuit of closing the item flagged in Stage 17. Six distinct, real failures, each diagnosed and fixed in turn rather than guessed past:
+
+1. **Forgot `pyarrow` in the Dockerfile's pip install** — `pandas_udf` needs it explicitly; plain Spark operations don't. Added it, unpinned.
+2. **Unpinned `pyarrow` grabbed 25.0.1** — same version-incompatibility class already found and fixed on Windows (pinned to 18.1.0 there), just never applied to this Dockerfile. Pinned here too. Didn't fix it alone (see below) but was still a real, necessary fix.
+3. **`openjdk-17-jre-headless` isn't packaged for this Debian release** — only 21 and 25 are. Reverted to `default-jre-headless` (21).
+4. **The actual root cause: Java 21's module system blocks Arrow's reflective `sun.misc.Unsafe` access**, even with `pyarrow==18.1.0` pinned. Tried `--add-opens=java.base/java.nio=ALL-UNNAMED` two different ways: via `spark.driver.extraJavaOptions` (SparkConf) — didn't work, and a check confirmed why: that config path never reaches local mode's driver JVM, since py4j launches it *before* Spark reads its own config. Then via the `JDK_JAVA_OPTIONS` environment variable — the standard mechanism every JVM 9+ process reads automatically — verified working on a bare `java -version` call (`NOTE: Picked up JDK_JAVA_OPTIONS`), but **still didn't reach the actual JVM py4j spawns for Spark** (0 occurrences of that message in the real job's logs, checked directly rather than assumed). Two real, verified attempts, both genuine dead ends — not documented as "should have worked," documented as "confirmed via direct test not to."
+5. **Switched strategy: match the one JVM version confirmed not to hit this restriction (Java 8, already used successfully for H2O) instead of chasing more flags for Java 17+.** No `openjdk-8` package available via this image's apt repos either — switched base image entirely to `eclipse-temurin:8-jre-jammy` (Java 8, officially maintained). **This is what actually fixed the Arrow/pandas_udf failure** — the job's computation succeeded completely for the first time, reaching the final `pdf.to_sql()` write step.
+6. **One more real bug on the way to the finish line:** the write to Postgres failed with `could not translate host name ... : Name or service not known`. Root cause, found by testing DNS resolution directly rather than assuming a transient network blip: this project's directory name is long enough that the Docker Compose container name (`creditdefaultpredictionpipelinewithfairnessconstraints-postgres-1`, 67 characters) **exceeds DNS's 63-character label limit** — confirmed via a direct `UnicodeError: label too long`. Fixed by using Docker Compose's short service-name alias (`postgres`) instead of the long container name, which resolved immediately.
+
+**Final, verified result:** `python features/spark_features.py` run against the real, full 13.6M-row `installments_payments.csv` inside the Java-8 Linux container — 339,587 applicants scored, loaded into `features.payment_trend_features`, confirmed by direct query afterward. The working Dockerfile is kept permanently at `docker/spark_job.Dockerfile` (not deleted as scratch work), and `features/spark_features.py`'s docstring now documents the real working path instead of "known limitation, untested on Linux."
+
+**Why six real failures in a row is worth logging in full, not condensing to "fixed it":** every one of them was a genuine, different root cause (a missing dependency, a version mismatch, an unavailable package, a confirmed-dead-end JVM flag mechanism — twice — a JVM version incompatibility, and a DNS label-length limit). Compressing this to "eventually got it working" would hide that the fix required actually falsifying two plausible-sounding hypotheses (the `--add-opens` delivery mechanisms) with direct evidence before finding the one that worked, which is the same discipline this whole log has tried to apply to every claim in this project, model performance included.
+
+---
+
 ## Open decisions / not yet made
 
 These will get their own entries once resolved — listed here so the log stays a live map of what's still undecided, not just a history of the past.
 
-- **`requirements.txt` pinning strategy** — exact version pins vs. loose ranges vs. `environment.yml` (Conda) as the source of truth with `requirements.txt` as a derived/secondary file. v2's plan lists both `environment.yml` and `requirements.txt` as separate deliverables; need to decide which one is authoritative to avoid drift between them. (`requirements.txt` has since been pinned and used successfully — `environment.yml` is still an empty stub; leaning toward `requirements.txt` as authoritative unless a real Conda-specific need shows up.)
-- **PySpark local mode vs. real cluster** — v2's `spark_features.py` assumes a `SparkSession` is available; for a local Docker Compose setup this means local-mode Spark inside a container, which needs its own resource budgeting (not yet reflected in `docker-compose.yml`).
-- **Whether the two-token Kaggle auth downgrade (`kaggle<1.7`) gets revisited** once actual pipeline code needs it — flagged above, not yet acted on.
-- **XNA-gender filtering isn't applied everywhere yet** — `models/train_champion.py` filters it, `experiments/compare.py`'s Step 4 table (Stage 10) does not, so those DP-gap numbers are inflated. Low priority since it doesn't change which model wins, but should be fixed before those numbers go in front of anyone external.
-- **MLflow Model Registry vs. local joblib artifacts for serving** — `serving/app.py` currently loads from `artifacts/champion_model.joblib` rather than `models:/credit_default/Production`; flagged in Stage 12.
-- **H2O AutoML's 240s comparison run is inconclusive** — only completed 1 of up to 8 requested models. Re-run with 600s+ if a real H2O-vs-CatBoost verdict is ever needed; not blocking since CatBoost is already the champion from Step 4's complete comparison.
-- **Airflow DAG (`dags/credit_default_retrain.py`) is written but not executed** — no Airflow scheduler is running (native Airflow isn't supported on Windows outside WSL; the `./airflow` Docker build context in `docker-compose.yml` hasn't been built). The task functions call real, already-tested project code (dbt, validation, drift detection, training, batch scoring), so the DAG wiring is correct, but the schedule itself has never actually fired. Standing up the Airflow container is the next step if this needs to run on a real cadence rather than manually.
-- **The underlying model is still age-biased — only the decision layer corrects for it.** Tried fixing this at the model level in Stage 16 (`ExponentiatedGradient` constrained retraining) — real progress (6.6x reduction in the age gap) but didn't clear the bar at the reduced training budget used for local iteration, and cost too much AUC to deploy over the post-hoc-corrected raw model. A longer constrained-training run (more boosting iterations, more `ExponentiatedGradient` rounds) is the natural next experiment if a model-level fix is wanted for its own sake — not attempted yet due to local iteration time constraints.
-- **Applicants who don't disclose gender don't get the fairness correction** — they fall back to the flat default threshold, meaning the age-bias fix is conditional on disclosure. Acceptable for a portfolio project; a real system would need a policy decision here (e.g. infer group via a compliant proxy method, or require disclosure for the calibration to apply).
+- **`requirements.txt` pinning strategy** — confirmed authoritative in Stage 22 (`environment.yml` removed as an empty, unused stub). Closed.
+- **Whether the two-token Kaggle auth downgrade (`kaggle<1.7`) gets revisited** — confirmed in Stage 22: nothing currently needs the 2.x CLI, pin stays. Closed, not open.
+- **The underlying model is still (somewhat) age-biased — the decision layer remains the thing making this deployable.** Stage 18 found and removed the real root cause (`age_years` was a raw model input the whole time, contradicting this project's own docs) and the constrained-retraining candidate finally passes the fairness gate on its own (`dp_age` 0.038) for the first time across three attempts — but at 0.023 AUC cost, just above this project's 0.02 acceptance rule, so the deployed system still uses the raw model + post-hoc thresholds rather than the constrained one. Revisited deliberately in Stage 22: the 0.02 rule stays, because it traces back to this project's own foundational tradeoff framing rather than being picked to fit this one result. Still genuinely open in the sense that the underlying model itself remains imperfect — closed as a *decision*, not as a *limitation*.
+- **Race/ethnicity fairness coverage is out of scope for this dataset, not unresolved** (Stage 20) — Home Credit has no surname, nationality, or real geography, which rules out BISG (the standard proxy method). Closing this would need a different/supplementary dataset (e.g. HMDA), not more work on this codebase. Listed here for visibility, not as a task to pick up.
