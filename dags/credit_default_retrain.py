@@ -55,7 +55,7 @@ def check_and_branch(**context):
         f"@{os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
     )
     engine = create_engine(url)
-    df = pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
+    df = pd.read_sql("SELECT * FROM features.fct_credit_features ORDER BY sk_id_curr", engine)
 
     # No historical snapshot store yet — compares the current table against
     # itself split in half as a placeholder for "reference vs. current batch".

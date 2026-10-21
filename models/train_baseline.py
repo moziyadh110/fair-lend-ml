@@ -46,7 +46,7 @@ FEATURE_COLS = [
 
 
 def load_features(engine) -> pd.DataFrame:
-    return pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
+    return pd.read_sql("SELECT * FROM features.fct_credit_features ORDER BY sk_id_curr", engine)
 
 
 def main():

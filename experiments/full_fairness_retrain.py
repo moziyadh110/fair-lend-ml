@@ -37,7 +37,7 @@ def main():
         f"@{os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
     )
     engine = create_engine(url)
-    df = pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
+    df = pd.read_sql("SELECT * FROM features.fct_credit_features ORDER BY sk_id_curr", engine)
     df = df[df["_protected_gender"] != "XNA"].reset_index(drop=True)
 
     X, y = df[FEATURE_COLS].fillna(0), df["target"]

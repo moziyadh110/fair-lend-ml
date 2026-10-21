@@ -49,7 +49,10 @@ def main():
         f"@{os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
     )
     engine = create_engine(url)
-    df = pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
+    # ORDER BY matters: train_test_split is positional, and Postgres returns
+    # rows in arbitrary order after a rebuild, which silently changes the
+    # holdout set (and every reported number) between otherwise identical runs.
+    df = pd.read_sql("SELECT * FROM features.fct_credit_features ORDER BY sk_id_curr", engine)
 
     # A handful of rows have code_gender='XNA' (Home Credit's placeholder for
     # undisclosed gender, not a real category) — too small a group (4 rows,

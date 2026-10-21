@@ -27,7 +27,7 @@ def main():
         f"@{os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
     )
     engine = create_engine(url)
-    df = pd.read_sql("SELECT * FROM features.fct_credit_features", engine)
+    df = pd.read_sql("SELECT * FROM features.fct_credit_features ORDER BY sk_id_curr", engine)
 
     # A handful of rows have code_gender='XNA' (Home Credit's placeholder for
     # undisclosed gender, not a real category) — same fix as models/train_champion.py
