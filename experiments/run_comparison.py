@@ -8,6 +8,12 @@ import os
 import sys
 from pathlib import Path
 
+# Must load before pandas: pandas pulls in pyarrow (pinned to 18.1.0 for
+# PySpark), and on native Windows, loading pyarrow's native libraries first
+# makes every LightGBM fit crash with "access violation reading 0x0".
+# Loading LightGBM first avoids it. Keep this above `import pandas`.
+import lightgbm  # noqa: F401, I001
+
 import pandas as pd
 from dotenv import load_dotenv
 from sklearn.model_selection import train_test_split
