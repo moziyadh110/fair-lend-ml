@@ -114,16 +114,45 @@ def test_deny_thresholds_differ_by_age_group_proving_mitigation_is_live(client):
     import serving.app as serving_app
 
     assert len(serving_app.GROUP_THRESHOLDS) > 0
-    young_threshold = serving_app._deny_threshold("F", 22)
-    old_threshold = serving_app._deny_threshold("F", 65)
-    assert young_threshold != old_threshold
+    # 22 vs 50, not vs 65: 62+ deliberately shares the most lenient cutoff,
+    # which on real data is the youngest group's.
+    young_threshold = serving_app._deny_threshold(22)
+    middle_threshold = serving_app._deny_threshold(50)
+    assert young_threshold != middle_threshold
 
 
-def test_undisclosed_gender_falls_back_to_default_threshold(client):
-    app_no_gender = dict(VALID_APPLICATION)
-    app_no_gender.pop("code_gender", None)
-    resp = client.post("/predict", json=app_no_gender, headers=AUTH_HEADERS)
-    assert resp.status_code == 200
+def test_62_plus_gets_the_most_lenient_live_cutoff(client):
+    import serving.app as serving_app
+
+    elderly = serving_app._deny_threshold(65)
+    assert all(elderly >= serving_app._deny_threshold(a) for a in (22, 35, 50))
+
+
+def test_gender_never_changes_the_decision(client):
+    """Gender is neither a model input nor a threshold key. Sending it (or
+    not) must not change a single field of the decision."""
+    bodies = []
+    for gender in ("M", "F", None):
+        application = dict(VALID_APPLICATION, amt_income_total=150001)  # bypass the response cache
+        if gender:
+            application["code_gender"] = gender
+        resp = client.post("/predict", json=application, headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        bodies.append((body["default_probability"], body["decision"], body["risk_tier"]))
+    assert bodies[0] == bodies[1] == bodies[2]
+
+
+def test_batch_and_realtime_thresholds_agree(client, monkeypatch):
+    import pandas as pd
+    import serving.app as serving_app
+    from serving.batch_predict import _deny_thresholds_per_row
+
+    thresholds = {"18-29": 0.6, "30-44": 0.5, "45-61": 0.45, "62+": 0.6}
+    monkeypatch.setattr(serving_app, "GROUP_THRESHOLDS", thresholds)
+    ages = [22, 35, 50, 62, 80]
+    batch = _deny_thresholds_per_row(pd.Series(ages), thresholds, default_threshold=0.5)
+    assert list(batch) == [serving_app._deny_threshold(a) for a in ages]
 
 
 def test_predict_without_api_key_is_rejected(client):

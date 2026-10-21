@@ -28,7 +28,7 @@ from serving.auth import require_api_key
 from serving.cache import build_client, cache_key, get_cached, set_cached
 from serving.schemas import LoanApplication, PredictionResponse
 from explainability.adverse_action import generate_adverse_action_reasons
-from explainability.fairness import age_bin_labels, non_disclosure_threshold
+from explainability.fairness import age_bin_labels, fallback_threshold
 
 load_dotenv()
 
@@ -135,23 +135,19 @@ def _credit_score(probability: float) -> int:
     return max(300, min(850, score))
 
 
-def _deny_threshold(gender: str | None, age_years: float) -> float:
-    """The fairness-calibrated DENY cutoff for this applicant's (gender, age
-    bin) group. If the applicant didn't disclose gender, or no calibrated
-    thresholds are loaded, or their group combination wasn't seen during
-    calibration: fall back to the MOST LENIENT calibrated threshold, not the
-    raw model's flat threshold — see explainability.fairness.
-    non_disclosure_threshold's docstring for why (falling back to the flat
-    threshold would quietly reintroduce the age bias non-disclosure exists
-    to sidestep). Never below 0.25, so the MANUAL_REVIEW tier always has
-    room below it regardless of calibration."""
+def _deny_threshold(age_years: float) -> float:
+    """The fairness-calibrated DENY cutoff for this applicant's age group.
+    Gender plays no part: setting a cutoff by sex is disparate treatment
+    under Reg B. If no calibrated thresholds are loaded, use the flat
+    default; if the age group wasn't seen during calibration, fall back to
+    the MOST LENIENT calibrated threshold — see explainability.fairness.
+    fallback_threshold for why. Never below 0.25, so the MANUAL_REVIEW tier
+    always has room below it regardless of calibration."""
     if not GROUP_THRESHOLDS:
         return DEFAULT_THRESHOLD
-    fallback = non_disclosure_threshold(GROUP_THRESHOLDS, fallback=DEFAULT_THRESHOLD)
-    if gender is None:
-        return max(0.25, fallback)
+    fallback = fallback_threshold(GROUP_THRESHOLDS, fallback=DEFAULT_THRESHOLD)
     age_bin = age_bin_labels([age_years]).astype(str).iloc[0]
-    return max(0.25, GROUP_THRESHOLDS.get((gender, age_bin), fallback))
+    return max(0.25, GROUP_THRESHOLDS.get(age_bin, fallback))
 
 
 def _risk_tier_and_decision(probability: float, deny_threshold: float) -> tuple[str, str]:
@@ -181,7 +177,7 @@ async def predict(application: LoanApplication):
 
         probability = float(CHAMPION_MODEL.predict_proba(X)[:, 1][0])
         credit_score = _credit_score(probability)
-        deny_threshold = _deny_threshold(application.code_gender, application.age_years)
+        deny_threshold = _deny_threshold(application.age_years)
         tier, decision = _risk_tier_and_decision(probability, deny_threshold)
 
         reasons = []

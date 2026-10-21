@@ -5,14 +5,10 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class LoanApplication(BaseModel):
-    # Optional, and NOT used as a model input feature — collected only to apply
-    # the fairness-calibrated per-group decision threshold (see
-    # explainability.fairness.calibrate_group_thresholds). Applicants who don't
-    # disclose fall back to the flat default threshold. Collecting protected-
-    # class data for fairness monitoring/remediation, while excluding it from
-    # the underlying prediction, is standard practice under ECOA/Reg B.
-    code_gender: Optional[str] = Field(None, pattern="^[MF]$")
-
+    # No gender field: it isn't a model input and no longer picks the decision
+    # threshold either (a sex-based cutoff is disparate treatment under Reg B).
+    # Gender fairness is audited offline in models/train_champion.py. A client
+    # that still sends `code_gender` is fine — Pydantic ignores unknown fields.
     amt_income_total: float = Field(..., gt=0)
     amt_credit: float = Field(..., gt=0)
     amt_annuity: float = Field(..., gt=0)

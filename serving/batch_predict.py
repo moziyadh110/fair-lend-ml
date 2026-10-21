@@ -15,28 +15,25 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from explainability.fairness import age_bin_labels, non_disclosure_threshold
+from explainability.fairness import age_bin_labels, fallback_threshold
 
 load_dotenv()
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 
 
-def _deny_thresholds_per_row(gender: pd.Series, age: pd.Series, group_thresholds: dict,
+def _deny_thresholds_per_row(age: pd.Series, group_thresholds: dict,
                               default_threshold: float) -> np.ndarray:
-    """Same per-group DENY cutoff logic as serving/app.py._deny_threshold,
+    """Same per-age-group DENY cutoff logic as serving/app.py._deny_threshold,
     vectorized for a whole portfolio — kept in sync deliberately since batch
     and real-time predictions must use the same fairness-calibrated decision,
-    not just the same model. Rows with a (gender, age_bin) combination not
-    seen during calibration (e.g. the excluded XNA-gender rows) fall back to
-    the most lenient calibrated threshold, not the flat default — same
-    non-disclosure policy as serving/app.py, for the same reason."""
+    not just the same model. Gender is never an input here either. Rows in an
+    age group not seen during calibration fall back to the most lenient
+    calibrated threshold, not the flat default — same policy as serving/app.py."""
+    if not group_thresholds:
+        return np.full(len(age), default_threshold)
+    fallback = fallback_threshold(group_thresholds, fallback=default_threshold)
     age_bins = age_bin_labels(age).astype(str)
-    fallback = non_disclosure_threshold(group_thresholds, fallback=default_threshold)
-    thresholds = np.full(len(gender), fallback)
-    for i in range(len(gender)):
-        t = group_thresholds.get((gender.iloc[i], age_bins.iloc[i]), fallback)
-        thresholds[i] = max(0.25, t)
-    return thresholds
+    return np.array([max(0.25, group_thresholds.get(b, fallback)) for b in age_bins])
 
 
 def batch_score_portfolio(output_table: str = "batch_scores") -> int:
@@ -55,10 +52,7 @@ def batch_score_portfolio(output_table: str = "batch_scores") -> int:
     X = features_df.reindex(columns=feature_cols, fill_value=0)
     probabilities = model.predict_proba(X)[:, 1]
 
-    deny_thresholds = _deny_thresholds_per_row(
-        features_df["_protected_gender"], features_df["_protected_age"],
-        group_thresholds, default_threshold,
-    )
+    deny_thresholds = _deny_thresholds_per_row(features_df["_protected_age"], group_thresholds, default_threshold)
 
     risk_tier = np.where(
         probabilities < 0.10, "low",
