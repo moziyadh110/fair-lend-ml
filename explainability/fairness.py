@@ -13,14 +13,18 @@ from sklearn.metrics import roc_auc_score
 
 DEMOGRAPHIC_PARITY_THRESHOLD = 0.05
 FOUR_FIFTHS_THRESHOLD = 0.80
-AGE_BIN_EDGES = [18, 30, 45, 60, 100]
-AGE_BIN_LABELS = ["18-30", "30-45", "45-60", "60+"]
+# Left-closed bins so a 62-year-old lands in "62+": Reg B (12 CFR 1002.6(b)(2))
+# protects applicants aged 62 or older from being treated less favorably
+# because of their age, and the last bin has to line up with that cutoff.
+AGE_BIN_EDGES = [18, 30, 45, 62, np.inf]
+AGE_BIN_LABELS = ["18-29", "30-44", "45-61", "62+"]
+ELDERLY_AGE_BIN = "62+"
 
 
 def age_bin_labels(age) -> pd.Series:
     """Single source of truth for age binning — used by the audit, the
     threshold calibrator, and serving/app.py, so they can never drift apart."""
-    return pd.cut(pd.Series(age), bins=AGE_BIN_EDGES, labels=AGE_BIN_LABELS)
+    return pd.cut(pd.Series(age), bins=AGE_BIN_EDGES, labels=AGE_BIN_LABELS, right=False)
 
 
 def full_fairness_audit(y_true, y_pred, y_pred_proba, gender, age) -> dict:
@@ -58,8 +62,32 @@ def full_fairness_audit(y_true, y_pred, y_pred_proba, gender, age) -> dict:
         age_approval_rates[str(group)] = float((y_pred[mask] == 0).mean())
     results["approval_rates_by_age_group"] = age_approval_rates
 
+    # The age gate is Reg B-aware: approval rates must match across the
+    # under-62 groups, and the 62+ group must not be approved less often than
+    # any of them. Reg B lets a creditor favor applicants 62 or older, and the
+    # calibrated thresholds do exactly that, so `dp_age` across all four bins
+    # is still reported but would penalize the favoring the law permits.
+    # "Not approved less often" allows 2 standard errors of sampling noise:
+    # a strict >= fails a perfectly age-blind model about half the time. The
+    # hard guarantee is the cutoff itself — calibrate_group_thresholds gives
+    # 62+ the most lenient one — this is the outcome-level check on top.
+    under_62 = age_bins != ELDERLY_AGE_BIN
+    results["dp_age_under_62"] = demographic_parity_difference(
+        y_true[under_62], y_pred[under_62], sensitive_features=age_bins[under_62]
+    )
+    elderly_rate = age_approval_rates.get(ELDERLY_AGE_BIN)
+    other_rates = [v for k, v in age_approval_rates.items() if k != ELDERLY_AGE_BIN]
+    if elderly_rate is None or not other_rates:
+        results["elderly_not_disadvantaged"] = True
+    else:
+        n_elderly = int((age_bins == ELDERLY_AGE_BIN).sum())
+        std_err = np.sqrt(elderly_rate * (1 - elderly_rate) / n_elderly)
+        results["elderly_not_disadvantaged"] = bool(elderly_rate >= max(other_rates) - 2 * std_err)
+
     results["demographic_parity_pass_gender"] = bool(results["dp_gender"] <= DEMOGRAPHIC_PARITY_THRESHOLD)
-    results["demographic_parity_pass_age"] = bool(results["dp_age"] <= DEMOGRAPHIC_PARITY_THRESHOLD)
+    results["demographic_parity_pass_age"] = bool(
+        results["dp_age_under_62"] <= DEMOGRAPHIC_PARITY_THRESHOLD and results["elderly_not_disadvantaged"]
+    )
     results["demographic_parity_pass"] = bool(
         results["demographic_parity_pass_gender"] and results["demographic_parity_pass_age"]
     )
@@ -170,74 +198,77 @@ def optimize_thresholds(estimator, X, y, sensitive_features, constraints: str = 
     return optimizer
 
 
-def calibrate_group_thresholds(y_pred_proba, gender, age, target_positive_rate: float | None = None) -> dict:
-    """Deterministic per-(gender, age-group) probability threshold for the
-    DENY decision, calibrated so every group's denial rate matches the
-    overall portfolio's denial rate at the given target — equalizing
-    approval rates without any randomized/interpolated decision.
+def calibrate_group_thresholds(y_pred_proba, age, target_positive_rate: float | None = None) -> dict:
+    """Deterministic per-age-group probability threshold for the DENY
+    decision, calibrated so every group's denial rate matches the overall
+    portfolio's denial rate at the given target — equalizing approval rates
+    without any randomized/interpolated decision.
 
-    Returns {(gender, age_bin): threshold}. A group's threshold is the
-    quantile of that group's predicted probabilities corresponding to
+    Keyed on age group only. Gender used to be part of the key, but setting
+    a different cutoff by sex is disparate treatment under Reg B however
+    good the intent, so gender is now audited but never decides anything.
+
+    Returns {age_bin: threshold}. A group's threshold is the quantile of
+    that group's predicted probabilities corresponding to
     `target_positive_rate` — e.g. if the target denial rate is 20%, the
     threshold is set at each group's own 80th percentile of predicted risk,
-    so exactly ~20% of that group is denied, same as every other group.
+    so ~20% of that group is denied, same as every other group.
+
+    One override: the 62+ group always gets the most lenient (highest)
+    threshold of any group. Equal-rate calibration alone would give it the
+    strictest cutoff, since the model scores older applicants as lower risk,
+    and Reg B doesn't allow an applicant 62 or older to be treated less
+    favorably because of age. This costs some approval-rate parity on
+    purpose; the audit reports the gap honestly rather than hiding it.
     """
     y_pred_proba = np.asarray(y_pred_proba)
-    gender = np.asarray(gender)
     age_bins = age_bin_labels(age).astype(str).values
 
     if target_positive_rate is None:
         target_positive_rate = float((y_pred_proba >= 0.5).mean())
 
     thresholds = {}
-    groups = pd.DataFrame({"gender": gender, "age_bin": age_bins}).drop_duplicates()
-    for _, row in groups.iterrows():
-        mask = (gender == row["gender"]) & (age_bins == row["age_bin"])
-        group_proba = y_pred_proba[mask]
+    for age_bin in AGE_BIN_LABELS:
+        group_proba = y_pred_proba[age_bins == age_bin]
         if len(group_proba) == 0:
             continue
-        threshold = float(np.quantile(group_proba, 1 - target_positive_rate))
-        thresholds[(row["gender"], row["age_bin"])] = threshold
+        thresholds[age_bin] = float(np.quantile(group_proba, 1 - target_positive_rate))
+
+    if ELDERLY_AGE_BIN in thresholds:
+        thresholds[ELDERLY_AGE_BIN] = max(thresholds.values())
 
     return thresholds
 
 
-def non_disclosure_threshold(thresholds: dict, fallback: float = 0.5) -> float:
-    """The DENY threshold for an applicant whose protected-attribute group is
-    unknown (declined to disclose gender, or a combination never seen during
-    calibration).
+def fallback_threshold(thresholds: dict, fallback: float = 0.5) -> float:
+    """The DENY threshold for an applicant whose age group has no calibrated
+    threshold (e.g. a group too small to appear in the calibration data).
 
     Deliberately NOT the flat/raw model's threshold — that threshold is
-    exactly the one Stage 14/15 showed produces a 0.456 age demographic-
-    parity gap, so falling back to it would mean non-disclosure quietly
-    reintroduces the bias the calibration exists to fix. Instead, use the
-    MOST LENIENT (lowest) threshold among all calibrated groups: an applicant
-    who doesn't disclose is judged at least as favorably as the best-treated
-    disclosed group, so choosing not to disclose can only help, never hurt,
-    relative to the fairness-corrected population. This is a "benefit of the
-    doubt" policy, not a mathematical fairness guarantee — see PROGRESS.md
-    for the real tradeoff this makes (denial rate rises slightly for the
-    disclosed population to keep the portfolio-wide rate on target, since
-    non-disclosed applicants are, on average, judged more leniently).
+    exactly the one that produced a 0.408 age demographic-parity gap, so
+    falling back to it would quietly reintroduce the bias the calibration
+    exists to fix. Instead, use the MOST LENIENT threshold among all
+    calibrated groups: an applicant DENY is `proba >= threshold`, so the
+    most lenient cutoff is the HIGHEST one. (An earlier version took the
+    lowest here, which is the strictest — the opposite of what it claimed.)
     """
     if not thresholds:
         return fallback
-    return min(thresholds.values())
+    return max(thresholds.values())
 
 
-def apply_group_thresholds(y_pred_proba, gender, age, thresholds: dict, default_threshold: float | None = None) -> np.ndarray:
-    """Apply per-group thresholds from calibrate_group_thresholds to produce
-    binary decisions. Falls back to `default_threshold` for any (gender,
-    age_bin) combination not seen during calibration — or, if not given, to
-    `non_disclosure_threshold(thresholds)` (see its docstring for why that's
-    the safer default than a flat threshold)."""
+def apply_group_thresholds(y_pred_proba, age, thresholds: dict, default_threshold: float | None = None) -> np.ndarray:
+    """Apply per-age-group thresholds from calibrate_group_thresholds to
+    produce binary decisions. Falls back to `default_threshold` for any age
+    group not seen during calibration — or, if not given, to
+    `fallback_threshold(thresholds)` (see its docstring for why that's the
+    safer default than a flat threshold)."""
     y_pred_proba = np.asarray(y_pred_proba)
-    gender = np.asarray(gender)
     age_bins = age_bin_labels(age).astype(str).values
-    fallback = default_threshold if default_threshold is not None else non_disclosure_threshold(thresholds)
+    fallback = default_threshold if default_threshold is not None else fallback_threshold(thresholds)
 
     pred = np.zeros(len(y_pred_proba), dtype=int)
     for i in range(len(y_pred_proba)):
-        t = thresholds.get((gender[i], age_bins[i]), fallback)
+        t = thresholds.get(age_bins[i], fallback)
         pred[i] = int(y_pred_proba[i] >= t)
     return pred

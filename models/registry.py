@@ -55,13 +55,14 @@ MAX_DP_GAP = 0.05
 
 
 def _serialize_group_thresholds(group_thresholds: dict) -> list:
-    """{(gender, age_bin): threshold} isn't JSON-serializable as-is (tuple
-    keys) — flatten to a list of records for mlflow.log_dict."""
-    return [{"gender": g, "age_bin": a, "threshold": t} for (g, a), t in group_thresholds.items()]
+    """{age_bin: threshold} -> a list of records for mlflow.log_dict. Kept as
+    records (not a plain dict) so the stored format matches what earlier
+    runs logged and an old champion still loads instead of crashing."""
+    return [{"age_bin": a, "threshold": t} for a, t in group_thresholds.items()]
 
 
 def _deserialize_group_thresholds(records: list) -> dict:
-    return {(r["gender"], r["age_bin"]): r["threshold"] for r in records}
+    return {r["age_bin"]: r["threshold"] for r in records}
 
 
 def register_champion(model, feature_cols: list[str], group_thresholds: dict,

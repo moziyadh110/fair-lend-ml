@@ -151,15 +151,17 @@ def main():
 
     if not audit_deployed["demographic_parity_pass"]:
         print(f"\nDeployed candidate ({deployed_name}) fails the flat-threshold gate — "
-              "calibrating deterministic per-(gender, age-bin) decision thresholds on the training set...")
+              "calibrating deterministic per-age-bin decision thresholds on the training set...")
         train_proba = deployed_model.predict_proba(X_train)[:, 1]
-        group_thresholds = calibrate_group_thresholds(train_proba, gender_train, age_train)
+        group_thresholds = calibrate_group_thresholds(train_proba, age_train)
 
-        pred_mitigated = apply_group_thresholds(deployed_proba_test, gender_test, age_test, group_thresholds)
+        pred_mitigated = apply_group_thresholds(deployed_proba_test, age_test, group_thresholds)
         final_audit = full_fairness_audit(y_test, pred_mitigated, deployed_proba_test, gender_test, age_test)
         mitigation_applied = True
         print(f"Fairness audit AFTER calibrated thresholds: dp_gender={final_audit['dp_gender']:.4f} "
-              f"dp_age={final_audit['dp_age']:.4f} (pass={final_audit['demographic_parity_pass']})")
+              f"dp_age={final_audit['dp_age']:.4f} dp_age_under_62={final_audit['dp_age_under_62']:.4f} "
+              f"62+_not_disadvantaged={final_audit['elderly_not_disadvantaged']} "
+              f"(pass={final_audit['demographic_parity_pass']})")
         mitigation_deployed = final_audit["demographic_parity_pass"]
 
     ARTIFACTS_DIR.mkdir(exist_ok=True)

@@ -90,10 +90,12 @@ def render():
                 st.metric("Equalized odds gap (gender)", f"{audit['eo_gender']:.4f}")
             with col2:
                 st.metric(
-                    "Demographic parity gap (age)", f"{audit['dp_age']:.4f}",
+                    "Demographic parity gap (age, under 62)", f"{audit['dp_age_under_62']:.4f}",
                     delta=f"threshold {report['demographic_parity_threshold']}",
                     delta_color="normal" if audit["demographic_parity_pass_age"] else "inverse",
                 )
+                st.caption(f"All ages incl. 62+: {audit['dp_age']:.4f} — 62+ is favored on purpose (Reg B), "
+                           f"62+ not disadvantaged: {audit['elderly_not_disadvantaged']}")
                 st.metric("Four-fifths ratio (gender)", f"{audit['four_fifths_ratio']:.3f}",
                            delta="PASS" if audit["four_fifths_pass"] else "FAIL")
 

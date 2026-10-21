@@ -84,29 +84,30 @@ def test_calibrate_group_thresholds_equalizes_denial_rates():
     before = full_fairness_audit(y_true, raw_pred, proba, gender, age)
     assert before["dp_age"] > 0.05  # confirms the synthetic data reproduces a real age gap
 
-    thresholds = calibrate_group_thresholds(proba, gender, age)
-    calibrated_pred = apply_group_thresholds(proba, gender, age, thresholds)
+    thresholds = calibrate_group_thresholds(proba, age)
+    calibrated_pred = apply_group_thresholds(proba, age, thresholds)
     after = full_fairness_audit(y_true, calibrated_pred, proba, gender, age)
 
-    assert after["dp_age"] < before["dp_age"]
-    assert after["dp_age"] < 0.05
+    # Parity is only required below 62; 62+ is deliberately favored (Reg B).
+    assert after["dp_age_under_62"] < before["dp_age_under_62"]
+    assert after["dp_age_under_62"] < 0.05
+    assert after["demographic_parity_pass_age"] is True
 
 
 def test_calibrated_thresholds_are_deterministic():
     """Same input, same output every time — no randomized decision boundary."""
     y_true, proba, gender, age = _age_biased_proba()
-    thresholds = calibrate_group_thresholds(proba, gender, age)
-    pred1 = apply_group_thresholds(proba, gender, age, thresholds)
-    pred2 = apply_group_thresholds(proba, gender, age, thresholds)
+    thresholds = calibrate_group_thresholds(proba, age)
+    pred1 = apply_group_thresholds(proba, age, thresholds)
+    pred2 = apply_group_thresholds(proba, age, thresholds)
     assert np.array_equal(pred1, pred2)
 
 
 def test_unseen_group_falls_back_to_default_threshold():
-    thresholds = {("F", "18-30"): 0.7}
+    thresholds = {"45-61": 0.7}
     proba = np.array([0.6, 0.8])
-    gender = np.array(["M", "M"])
     age = np.array([25, 25])
-    pred = apply_group_thresholds(proba, gender, age, thresholds, default_threshold=0.5)
+    pred = apply_group_thresholds(proba, age, thresholds, default_threshold=0.5)
     assert list(pred) == [1, 1]  # both >= default 0.5, group not in thresholds dict
 
 
@@ -197,23 +198,77 @@ def test_fair_ensemble_model_is_picklable():
     assert np.allclose(wrapped.predict_proba(X), restored.predict_proba(X))
 
 
-def test_non_disclosure_threshold_is_most_lenient():
-    from explainability.fairness import non_disclosure_threshold
+def test_fallback_threshold_is_most_lenient():
+    """DENY is proba >= threshold, so the most lenient cutoff is the highest.
+    Guards against the old bug where this took the minimum (the strictest)."""
+    from explainability.fairness import fallback_threshold
 
-    thresholds = {("F", "18-30"): 0.7, ("M", "18-30"): 0.4, ("F", "60+"): 0.6}
-    assert non_disclosure_threshold(thresholds) == 0.4
+    thresholds = {"18-29": 0.7, "30-44": 0.4, "62+": 0.6}
+    assert fallback_threshold(thresholds) == 0.7
 
 
-def test_non_disclosure_threshold_falls_back_when_empty():
-    from explainability.fairness import non_disclosure_threshold
+def test_fallback_threshold_falls_back_when_empty():
+    from explainability.fairness import fallback_threshold
 
-    assert non_disclosure_threshold({}, fallback=0.55) == 0.55
+    assert fallback_threshold({}, fallback=0.55) == 0.55
 
 
 def test_apply_group_thresholds_defaults_to_lenient_fallback_for_unseen_group():
-    thresholds = {("F", "18-30"): 0.8, ("M", "18-30"): 0.3}
-    proba = np.array([0.5])  # would fail against 0.8, but the unseen group here should use 0.3
-    gender = np.array(["X"])  # not in the dict
-    age = np.array([25])
-    pred = apply_group_thresholds(proba, gender, age, thresholds)  # no default_threshold passed
-    assert pred[0] == 1  # 0.5 >= 0.3 (the lenient fallback), so denied
+    thresholds = {"30-44": 0.8, "45-61": 0.3}
+    proba = np.array([0.5])  # denied at 0.3, approved at the lenient 0.8 fallback
+    age = np.array([25])  # 18-29 isn't in the dict
+    pred = apply_group_thresholds(proba, age, thresholds)  # no default_threshold passed
+    assert pred[0] == 0
+
+
+def test_age_bins_put_62_year_olds_in_the_elderly_group():
+    from explainability.fairness import age_bin_labels
+
+    labels = age_bin_labels([18, 29.9, 30, 61.9, 62, 100]).astype(str).tolist()
+    assert labels == ["18-29", "18-29", "30-44", "45-61", "62+", "62+"]
+
+
+def test_applicants_62_plus_always_get_the_most_favorable_cutoff():
+    """Reg B: an applicant 62 or older can't be treated less favorably because
+    of age. Equal-rate calibration alone would give 62+ the strictest cutoff,
+    since the model scores older applicants as lower risk."""
+    _, proba, _, age = _age_biased_proba()
+    thresholds = calibrate_group_thresholds(proba, age)
+    assert thresholds["62+"] == max(thresholds.values())
+
+
+def test_62_plus_applicant_approved_whenever_any_younger_applicant_with_same_score_is():
+    _, proba, _, age = _age_biased_proba()
+    thresholds = calibrate_group_thresholds(proba, age)
+    for score in np.linspace(0, 1, 101):
+        elderly_denied = apply_group_thresholds([score], [70], thresholds)[0]
+        younger_denied = [apply_group_thresholds([score], [a], thresholds)[0] for a in (22, 35, 50)]
+        assert elderly_denied <= min(younger_denied)
+
+
+def test_age_gate_fails_when_62_plus_is_approved_less_than_other_groups():
+    rng = np.random.default_rng(0)
+    n = 20000
+    age = rng.uniform(18, 90, size=n)
+    y_true = rng.integers(0, 2, n)
+    y_pred = np.zeros(n, dtype=int)
+    elderly = age >= 62
+    y_pred[elderly & (rng.random(n) < 0.2)] = 1  # deny 20% of 62+, nobody else
+    gender = rng.choice(["M", "F"], size=n)
+    results = full_fairness_audit(y_true, y_pred, y_pred.astype(float), gender, age)
+    assert results["dp_age_under_62"] == 0
+    assert results["elderly_not_disadvantaged"] is False
+    assert results["demographic_parity_pass_age"] is False
+
+
+def test_age_gate_allows_favoring_62_plus():
+    rng = np.random.default_rng(0)
+    n = 20000
+    age = rng.uniform(18, 90, size=n)
+    y_true = rng.integers(0, 2, n)
+    y_pred = (rng.random(n) < 0.3).astype(int)
+    y_pred[age >= 62] = 0  # approve every 62+ applicant
+    gender = rng.choice(["M", "F"], size=n)
+    results = full_fairness_audit(y_true, y_pred, y_pred.astype(float), gender, age)
+    assert results["dp_age"] > 0.05  # the all-ages gap is large on purpose...
+    assert results["demographic_parity_pass_age"] is True  # ...and still passes

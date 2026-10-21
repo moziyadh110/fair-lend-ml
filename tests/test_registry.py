@@ -32,7 +32,7 @@ def isolated_mlflow_registry(tmp_path):
 
 
 def test_group_thresholds_round_trip_through_json_serialization():
-    thresholds = {("F", "18-30"): 0.7, ("M", "60+"): 0.4}
+    thresholds = {"18-29": 0.7, "62+": 0.4}
     records = _serialize_group_thresholds(thresholds)
     restored = _deserialize_group_thresholds(records)
     assert restored == thresholds
@@ -45,7 +45,7 @@ def test_register_and_load_champion_round_trip():
     model = LogisticRegression().fit(X, y)
 
     feature_cols = ["f1", "f2"]
-    group_thresholds = {("F", "18-30"): 0.55, ("M", "30-45"): 0.6}
+    group_thresholds = {"18-29": 0.55, "30-44": 0.6}
 
     version = register_champion(
         model, feature_cols, group_thresholds, default_threshold=0.5,
