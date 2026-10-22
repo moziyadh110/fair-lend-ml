@@ -1,0 +1,13 @@
+# Serving image only (serving/Dockerfile). Pins match the root requirements.txt;
+# this is the subset the API imports, without Spark, H2O, dbt or MLflow —
+# the container loads the champion from the baked-in joblib artifact.
+pandas==2.3.3
+scikit-learn==1.8.0
+catboost==1.2.10
+shap==0.52.0
+fairlearn==0.14.0
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+pydantic==2.12.5
+redis==8.1.0
+python-dotenv==1.2.2

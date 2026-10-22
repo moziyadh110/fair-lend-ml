@@ -12,26 +12,24 @@ services:
     image: redis:7-alpine
     ports: ["6379:6379"]
 
-  mlflow:
-    build: ./mlflow
-    ports: ["5001:5000"]
-    depends_on: [postgres]
-    environment:
-      MLFLOW_BACKEND_STORE_URI: postgresql://pipeline:pipeline123@postgres/credit_default
-
+  # Build context is the project root: the API imports explainability/ too,
+  # and the image bakes in artifacts/champion_model.joblib (run
+  # models/train_champion.py first). No MLflow server: the registry is a local
+  # store used at training time, and serving falls back to the baked-in artifact.
   api:
-    build: ./serving
+    build:
+      context: .
+      dockerfile: serving/Dockerfile
     ports: ["8000:8000"]
-    depends_on: [mlflow, redis]
-    env_file: .env   # API_KEY, POSTGRES_*, FRED_API_KEY
+    depends_on: [redis]
+    env_file: .env   # API_KEY
     environment:
       REDIS_HOST: redis
-      MLFLOW_TRACKING_URI: http://mlflow:5000
 
   dashboard:
     build: ./dashboard
     ports: ["8501:8501"]
-    depends_on: [postgres, mlflow]
+    depends_on: [postgres]
 
   airflow:
     build: ./airflow

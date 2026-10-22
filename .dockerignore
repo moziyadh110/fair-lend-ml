@@ -1,0 +1,11 @@
+.git
+.env
+data/
+mlruns/
+mlartifacts/
+mlflow.db
+catboost_info/
+notebooks/
+**/__pycache__
+.pytest_cache
+*.md

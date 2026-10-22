@@ -30,10 +30,11 @@ python models/train_champion.py        # trains CatBoost champion + fairness aud
 
 python serving/batch_predict.py        # score the full portfolio
 uvicorn serving.app:app --reload       # real-time API on :8000
+docker compose up -d --build api       # or the same API as a container (bakes in the trained model)
 streamlit run monitoring/dashboard.py  # monitoring UI on :8501
 
 docker compose up -d --build airflow   # optional: orchestration, see below
-pytest tests/                          # 71 tests
+pytest tests/                          # 79 tests
 python serving/load_test.py            # optional: needs the API running first
 ```
 
@@ -73,7 +74,7 @@ Postgres (raw) --dbt--> Postgres (staging/intermediate/features)
 - `.github/workflows/ci.yml` — pytest + `dbt parse` on every push/PR
 - `monitoring/` — drift detection (PSI + Evidently), alerting, Streamlit dashboard
 - `dags/` — Airflow retraining DAG, containerized (`airflow/`) and verified with a real end-to-end run
-- `tests/` — 71 tests covering the above
+- `tests/` — 79 tests covering the above
 
 ## Known gaps
 

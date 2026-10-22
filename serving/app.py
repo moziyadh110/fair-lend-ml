@@ -1,14 +1,11 @@
 """FastAPI serving layer: real-time scoring with Redis caching, SHAP-backed
 adverse action reason codes, and optional champion-challenger shadow scoring.
 
-Loads model + feature-column list from local joblib artifacts (produced by
-`models/train_champion.py`) rather than MLflow's Model Registry stage
-promotion (`models:/credit_default/Production`) that the plan sketches.
-MLflow's registry needs a database-backed tracking store and a real
-promotion workflow (Step 7's DAG) — wiring that up is out of scope for
-getting the serving path itself working and testable today. Swapping the
-loader to pull from the registry later is a localized change (see
-PROGRESS.md).
+Loads the model, feature-column list and calibrated thresholds from MLflow's
+Model Registry (`models:/credit_default@champion`, promoted by
+`models/train_champion.py`), falling back to the local joblib artifact when
+the registry has nothing promoted or isn't available — e.g. inside the
+serving container, which ships the artifact instead of an MLflow store.
 """
 import json
 import logging
