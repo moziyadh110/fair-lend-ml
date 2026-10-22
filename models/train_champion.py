@@ -31,6 +31,7 @@ from evaluation.credit_metrics import full_evaluation_report
 from explainability.fairness import (
     DEMOGRAPHIC_PARITY_THRESHOLD,
     FairEnsembleModel,
+    age_bin_labels,
     apply_group_thresholds,
     calibrate_group_thresholds,
     full_fairness_audit,
@@ -89,10 +90,7 @@ def main():
     # tradeoff for local iteration — see PROGRESS.md Stage 16.
     print("\nCandidate 2 — fairness-constrained CatBoost (ExponentiatedGradient) — training...")
 
-    def age_bin(s):
-        return pd.cut(s, bins=[18, 30, 45, 60, 100], labels=["18-30", "30-45", "45-60", "60+"])
-
-    sensitive_train = pd.DataFrame({"gender": gender_train.values, "age_bin": age_bin(age_train).values})
+    sensitive_train = pd.DataFrame({"gender": gender_train.values, "age_bin": age_bin_labels(age_train).values})
 
     fast_catboost = CatBoostClassifier(
         iterations=150, depth=5, learning_rate=0.15,

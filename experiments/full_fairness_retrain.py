@@ -25,7 +25,12 @@ from sqlalchemy import create_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluation.credit_metrics import full_evaluation_report
-from explainability.fairness import FairEnsembleModel, full_fairness_audit, retrain_with_fairness_constraints
+from explainability.fairness import (
+    FairEnsembleModel,
+    age_bin_labels,
+    full_fairness_audit,
+    retrain_with_fairness_constraints,
+)
 from models.train_baseline import FEATURE_COLS
 
 load_dotenv()
@@ -47,10 +52,7 @@ def main():
         X, y, gender, age, test_size=0.2, stratify=y, random_state=42
     )
 
-    def age_bin(s):
-        return pd.cut(s, bins=[18, 30, 45, 60, 100], labels=["18-30", "30-45", "45-60", "60+"])
-
-    sensitive_train = pd.DataFrame({"gender": gender_train.values, "age_bin": age_bin(age_train).values})
+    sensitive_train = pd.DataFrame({"gender": gender_train.values, "age_bin": age_bin_labels(age_train).values})
 
     full_catboost = CatBoostClassifier(
         iterations=500, depth=6, learning_rate=0.1,
