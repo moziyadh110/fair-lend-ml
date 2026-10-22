@@ -2,7 +2,7 @@
 
 Credit default prediction pipeline with fairness constraints: 7 relational tables → dbt feature engineering → WoE scorecard baseline → gradient-boosting challenger comparison → SHAP explainability → fairness-audited FastAPI serving → monitoring & orchestration.
 
-**Current status: trained champion model is cleared for production**, with a documented age-related bias in the underlying model corrected via calibrated per-group decision thresholds (live in both the real-time API and batch scoring — not just an audit report). See `MODEL_CARD.md` for the full fairness investigation and mitigation before using anything here for a real decision.
+**Current status: trained champion model is cleared for production**, with a documented age-related bias in the underlying model corrected via calibrated per-age-group decision thresholds (live in both the real-time API and batch scoring — not just an audit report). Gender plays no part in any decision, and applicants 62+ always get the most lenient cutoff, per Regulation B. See `MODEL_CARD.md` for the full fairness investigation and mitigation before using anything here for a real decision.
 
 ## What's here
 
@@ -33,7 +33,7 @@ uvicorn serving.app:app --reload       # real-time API on :8000
 streamlit run monitoring/dashboard.py  # monitoring UI on :8501
 
 docker compose up -d --build airflow   # optional: orchestration, see below
-pytest tests/                          # 64 tests
+pytest tests/                          # 71 tests
 python serving/load_test.py            # optional: needs the API running first
 ```
 
@@ -73,11 +73,11 @@ Postgres (raw) --dbt--> Postgres (staging/intermediate/features)
 - `.github/workflows/ci.yml` — pytest + `dbt parse` on every push/PR
 - `monitoring/` — drift detection (PSI + Evidently), alerting, Streamlit dashboard
 - `dags/` — Airflow retraining DAG, containerized (`airflow/`) and verified with a real end-to-end run
-- `tests/` — 64 tests covering the above
+- `tests/` — 71 tests covering the above
 
 ## Known gaps
 
-- The underlying model retains some age bias via legitimate proxy correlation (credit history length); fairness is achieved via calibrated per-group decision thresholds live in serving, not a fully bias-free model — see `MODEL_CARD.md`. A constrained-retraining candidate now passes the fairness gate on its own, but at slightly more AUC cost than this project's acceptance rule allows.
+- The underlying model retains some age bias via legitimate proxy correlation (credit history length); fairness is achieved via calibrated per-age-group decision thresholds live in serving, not a fully bias-free model — see `MODEL_CARD.md`. A constrained-retraining candidate now passes the fairness gate on its own, but at slightly more AUC cost than this project's acceptance rule allows.
 - Fairness coverage is gender + age only — no race/ethnicity, because this dataset has no surname/geography/nationality to support the standard proxy method (BISG). A dataset limitation, not something more engineering closes — see `PROGRESS.md` Stage 20.
-- Applicants who decline to disclose gender get a "benefit of the doubt" fallback threshold (most lenient calibrated group), not the fairness correction proper — a deliberate policy choice, not an oversight.
+- Applicants 62+ are approved far more often than other age groups (96% vs. about 68%), because the age-group thresholds never give them a stricter cutoff than anyone else. That's allowed under Regulation B and deliberate, so the age gate checks parity among the under-62 groups and that 62+ is never disadvantaged — see `MODEL_CARD.md`.
 - Full detail on every gap and why it's still open: `PROGRESS.md`, "Open decisions" section at the bottom
